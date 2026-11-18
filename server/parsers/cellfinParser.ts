@@ -1,5 +1,12 @@
 import type { MfsProviderParser, ParsedMfsNotification, RawNotificationInput } from './types.ts';
-import { containsSensitiveOtpOrPin, normalizeBdPhone, parseBdtAmount, sanitizeSensitiveContent } from './types.ts';
+import {
+  containsSensitiveOtpOrPin,
+  extractSmsSenderFromPackage,
+  extractTransactionTime,
+  normalizeBdPhone,
+  parseBdtAmount,
+  sanitizeSensitiveContent,
+} from './types.ts';
 
 export class CellfinParser implements MfsProviderParser {
   readonly provider = 'CELLFIN' as const;
@@ -7,7 +14,8 @@ export class CellfinParser implements MfsProviderParser {
 
   canParse(input: RawNotificationInput): boolean {
     const pkg = input.packageName.toLowerCase();
-    const combined = `${input.senderHeader ?? ''} ${input.title ?? ''} ${input.body}`.toLowerCase();
+    const senderHdr = extractSmsSenderFromPackage(input.packageName, input.senderHeader);
+    const combined = `${senderHdr} ${input.title ?? ''} ${input.body}`.toLowerCase();
     return (
       this.knownPackages.some((p) => p.toLowerCase() === pkg) ||
       combined.includes('cellfin') ||
@@ -31,6 +39,7 @@ export class CellfinParser implements MfsProviderParser {
         balanceBdt: null,
         bankName: 'Islami Bank Bangladesh PLC',
         reference: null,
+        transactionTime: null,
         confidence: 0,
         redactedBody: '[REDACTED_OTP_OR_PIN_NOTIFICATION]',
         parserModule: 'cellfinParser',
@@ -55,6 +64,7 @@ export class CellfinParser implements MfsProviderParser {
         balanceBdt: null,
         bankName: 'Islami Bank Bangladesh PLC',
         reference: null,
+        transactionTime: extractTransactionTime(body, input.deviceTimestampMs),
         confidence: 15,
         redactedBody: body,
         parserModule: 'cellfinParser',
@@ -73,6 +83,7 @@ export class CellfinParser implements MfsProviderParser {
     const receiverAccount = acctMatch?.[1] ?? null;
     const senderPhone = normalizeBdPhone(senderMatch?.[1]);
     const balanceBdt = parseBdtAmount(balMatch?.[1]);
+    const transactionTime = extractTransactionTime(body, input.deviceTimestampMs);
 
     const txType = /qr/i.test(body) ? 'CELLFIN_QR_CREDIT' : 'CELLFIN_TRANSFER_CREDIT';
 
@@ -97,6 +108,7 @@ export class CellfinParser implements MfsProviderParser {
       balanceBdt,
       bankName: 'Islami Bank Bangladesh PLC',
       reference: trxId,
+      transactionTime,
       confidence: Math.min(100, confidence),
       redactedBody: body,
       parserModule: 'cellfinParser',

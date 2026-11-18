@@ -44,11 +44,15 @@ class MfsSmsReceiver : BroadcastReceiver() {
 
         val redacted = MfsNotificationListenerService.sanitizeBody(fullBody)
         val ts = messages[0].timestampMillis
+        val simSlot = extractSimSlot(intent)
         val hash = DeviceCryptoStore.sha256Hex("SMS|$sender|$redacted|${ts / 1000}")
         val entity = QueuedNotificationEntity(
             eventUid = UUID.randomUUID().toString(),
             eventHash = hash,
+            sourceChannel = "SMS",
             packageName = "sms:$sender",
+            senderHeader = sender,
+            simSlot = simSlot,
             title = "SMS from $sender",
             bodyRedacted = redacted,
             deviceTimestampMs = ts
@@ -74,5 +78,13 @@ class MfsSmsReceiver : BroadcastReceiver() {
                 pendingResult.finish()
             }
         }
+    }
+
+    private fun extractSimSlot(intent: Intent): Int? {
+        val rawSlot = intent.getIntExtra(
+            "android.telephony.extra.SLOT_INDEX",
+            intent.getIntExtra("slot", intent.getIntExtra("simSlot", -1))
+        )
+        return if (rawSlot >= 0) rawSlot + 1 else null
     }
 }

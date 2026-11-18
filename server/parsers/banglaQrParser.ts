@@ -1,13 +1,20 @@
 import type { MfsProviderParser, ParsedMfsNotification, RawNotificationInput } from './types.ts';
-import { containsSensitiveOtpOrPin, normalizeBdPhone, parseBdtAmount, sanitizeSensitiveContent } from './types.ts';
+import {
+  containsSensitiveOtpOrPin,
+  extractSmsSenderFromPackage,
+  extractTransactionTime,
+  normalizeBdPhone,
+  parseBdtAmount,
+  sanitizeSensitiveContent,
+} from './types.ts';
 
 const BANK_PATTERNS: Array<{ match: RegExp; name: string }> = [
-  { match: /\bcity\s*bank|citytouch\b/i, name: 'The City Bank PLC' },
-  { match: /\bbrac\s*bank|astha\b/i, name: 'BRAC Bank PLC' },
+  { match: /\bcity\s*bank|citytouch|citybank\b/i, name: 'The City Bank PLC' },
+  { match: /\bbrac\s*bank|bracbank|astha\b/i, name: 'BRAC Bank PLC' },
   { match: /\bdbbl|dutch[\s-]*bangla|nexuspay\b/i, name: 'Dutch-Bangla Bank PLC' },
   { match: /\bebl|eastern\s*bank|skybanking\b/i, name: 'Eastern Bank PLC' },
   { match: /\bibbl|islami\s*bank\b/i, name: 'Islami Bank Bangladesh PLC' },
-  { match: /\bprime\s*bank\b/i, name: 'Prime Bank PLC' },
+  { match: /\bprime\s*bank|primebank\b/i, name: 'Prime Bank PLC' },
   { match: /\bsonali\s*bank\b/i, name: 'Sonali Bank PLC' },
 ];
 
@@ -16,7 +23,8 @@ export class BanglaQrParser implements MfsProviderParser {
   readonly knownPackages = ['com.citybank.citytouch', 'com.bracbank.astha', 'com.dbbl.nexus.pay', 'com.ebl.skybanking'];
 
   canParse(input: RawNotificationInput): boolean {
-    const combined = `${input.senderHeader ?? ''} ${input.title ?? ''} ${input.body}`.toLowerCase();
+    const senderHdr = extractSmsSenderFromPackage(input.packageName, input.senderHeader);
+    const combined = `${senderHdr} ${input.title ?? ''} ${input.body}`.toLowerCase();
     return (
       combined.includes('banglaqr') ||
       combined.includes('bangla qr') ||
@@ -42,6 +50,7 @@ export class BanglaQrParser implements MfsProviderParser {
         balanceBdt: null,
         bankName: null,
         reference: null,
+        transactionTime: null,
         confidence: 0,
         redactedBody: '[REDACTED_OTP_OR_PIN_NOTIFICATION]',
         parserModule: 'banglaQrParser',
@@ -66,6 +75,7 @@ export class BanglaQrParser implements MfsProviderParser {
         balanceBdt: null,
         bankName: null,
         reference: null,
+        transactionTime: extractTransactionTime(body, input.deviceTimestampMs),
         confidence: 15,
         redactedBody: body,
         parserModule: 'banglaQrParser',
@@ -73,9 +83,10 @@ export class BanglaQrParser implements MfsProviderParser {
       };
     }
 
-    const bankFound = BANK_PATTERNS.find((b) => b.match.test(`${input.senderHeader ?? ''} ${body}`));
+    const senderHdr = extractSmsSenderFromPackage(input.packageName, input.senderHeader);
+    const bankFound = BANK_PATTERNS.find((b) => b.match.test(`${senderHdr} ${body}`));
     const amountMatch = body.match(/(?:BDT|Tk)\s*([\d,]+(?:\.\d{1,2})?)/i);
-    const trxMatch = body.match(/\b(?:Ref|TrxID|TxnID|TxnId|RRN)\s*[:#-]?\s*(?:NPSB\/QR-)?([A-Z0-9-]{6,22})\b/i);
+    const trxMatch = body.match(/\b(?:Desc|Ref|TrxID|TxnID|TxnId|RRN)\s*[:#-]?\s*(?:NPSB\/QR-)?([A-Z0-9-]{6,22})\b/i);
     const acctMatch = body.match(/\bA\/C\s*[:#-]?\s*([*\d]{4,18})\b/i);
     const senderMatch = body.match(/\bfrom\s+(?:\+?88)?(01\d{9})\b/i);
     const balMatch = body.match(/\b(?:Avl\s*Bal|Bal|Balance)\s*[:#-]?\s*(?:BDT|Tk)?\s*([\d,]+(?:\.\d{1,2})?)/i);
@@ -85,6 +96,7 @@ export class BanglaQrParser implements MfsProviderParser {
     const receiverAccount = acctMatch?.[1] ?? null;
     const senderPhone = normalizeBdPhone(senderMatch?.[1]);
     const balanceBdt = parseBdtAmount(balMatch?.[1]);
+    const transactionTime = extractTransactionTime(body, input.deviceTimestampMs);
 
     let confidence = 0;
     if (/credited|received/i.test(body)) confidence += 20;
@@ -107,6 +119,7 @@ export class BanglaQrParser implements MfsProviderParser {
       balanceBdt,
       bankName: bankFound?.name ?? 'Bangla QR Participating Bank',
       reference: trxId,
+      transactionTime,
       confidence: Math.min(100, confidence),
       redactedBody: body,
       parserModule: 'banglaQrParser',

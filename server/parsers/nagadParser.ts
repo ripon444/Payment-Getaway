@@ -1,5 +1,13 @@
 import type { MfsProviderParser, ParsedMfsNotification, RawNotificationInput } from './types.ts';
-import { containsSensitiveOtpOrPin, normalizeBdPhone, parseBdtAmount, sanitizeSensitiveContent } from './types.ts';
+import {
+  containsSensitiveOtpOrPin,
+  extractMfsReceiverAccount,
+  extractSmsSenderFromPackage,
+  extractTransactionTime,
+  normalizeBdPhone,
+  parseBdtAmount,
+  sanitizeSensitiveContent,
+} from './types.ts';
 
 export class NagadParser implements MfsProviderParser {
   readonly provider = 'NAGAD' as const;
@@ -7,7 +15,8 @@ export class NagadParser implements MfsProviderParser {
 
   canParse(input: RawNotificationInput): boolean {
     const pkg = input.packageName.toLowerCase();
-    const combined = `${input.senderHeader ?? ''} ${input.title ?? ''} ${input.body}`.toLowerCase();
+    const senderHdr = extractSmsSenderFromPackage(input.packageName, input.senderHeader);
+    const combined = `${senderHdr} ${input.title ?? ''} ${input.body}`.toLowerCase();
     return (
       this.knownPackages.some((p) => p.toLowerCase() === pkg) ||
       combined.includes('nagad') ||
@@ -32,6 +41,7 @@ export class NagadParser implements MfsProviderParser {
         balanceBdt: null,
         bankName: 'Nagad',
         reference: null,
+        transactionTime: null,
         confidence: 0,
         redactedBody: '[REDACTED_OTP_OR_PIN_NOTIFICATION]',
         parserModule: 'nagadParser',
@@ -63,6 +73,7 @@ export class NagadParser implements MfsProviderParser {
         balanceBdt: null,
         bankName: 'Nagad',
         reference: null,
+        transactionTime: extractTransactionTime(body, input.deviceTimestampMs),
         confidence: 15,
         redactedBody: body,
         parserModule: 'nagadParser',
@@ -82,8 +93,10 @@ export class NagadParser implements MfsProviderParser {
     const amountBdt = parseBdtAmount(amountMatch?.[1]);
     const trxId = trxMatch?.[1]?.toUpperCase() ?? null;
     const senderPhone = normalizeBdPhone(senderMatch?.[1]);
+    const receiverAccount = extractMfsReceiverAccount(body);
     const balanceBdt = parseBdtAmount(balanceMatch?.[1]);
     const reference = refMatch?.[1] ?? null;
+    const transactionTime = extractTransactionTime(body, input.deviceTimestampMs);
 
     let confidence = 0;
     if (txType) confidence += 20;
@@ -102,10 +115,11 @@ export class NagadParser implements MfsProviderParser {
       amountBdt,
       trxId,
       senderPhone,
-      receiverAccount: null,
+      receiverAccount,
       balanceBdt,
       bankName: 'Nagad',
       reference,
+      transactionTime,
       confidence,
       redactedBody: body,
       parserModule: 'nagadParser',

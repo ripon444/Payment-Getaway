@@ -1,5 +1,12 @@
 import type { MfsProviderParser, ParsedMfsNotification, RawNotificationInput } from './types.ts';
-import { containsSensitiveOtpOrPin, normalizeBdPhone, parseBdtAmount, sanitizeSensitiveContent } from './types.ts';
+import {
+  containsSensitiveOtpOrPin,
+  extractSmsSenderFromPackage,
+  extractTransactionTime,
+  normalizeBdPhone,
+  parseBdtAmount,
+  sanitizeSensitiveContent,
+} from './types.ts';
 
 interface BankRuleProfile {
   bankName: string;
@@ -79,7 +86,8 @@ export class BankSmsParser implements MfsProviderParser {
   }
 
   canParse(input: RawNotificationInput): boolean {
-    const combined = `${input.senderHeader ?? ''} ${input.title ?? ''} ${input.body}`;
+    const senderHdr = extractSmsSenderFromPackage(input.packageName, input.senderHeader);
+    const combined = `${senderHdr} ${input.title ?? ''} ${input.body}`;
     if (BUILTIN_BANK_PROFILES.some((p) => p.senderMatch.test(combined))) {
       return true;
     }
@@ -105,6 +113,7 @@ export class BankSmsParser implements MfsProviderParser {
         balanceBdt: null,
         bankName: null,
         reference: null,
+        transactionTime: null,
         confidence: 0,
         redactedBody: '[REDACTED_OTP_OR_PIN_NOTIFICATION]',
         parserModule: 'bankSmsParser',
@@ -129,6 +138,7 @@ export class BankSmsParser implements MfsProviderParser {
         balanceBdt: null,
         bankName: null,
         reference: null,
+        transactionTime: extractTransactionTime(body, input.deviceTimestampMs),
         confidence: 15,
         redactedBody: body,
         parserModule: 'bankSmsParser',
@@ -136,7 +146,9 @@ export class BankSmsParser implements MfsProviderParser {
       };
     }
 
-    const headerAndBody = `${input.senderHeader ?? ''} ${body}`;
+    const senderHdr = extractSmsSenderFromPackage(input.packageName, input.senderHeader);
+    const headerAndBody = `${senderHdr} ${body}`;
+    const transactionTime = extractTransactionTime(body, input.deviceTimestampMs);
 
     // 1. Check dynamic DB templates first
     for (const tpl of this.dynamicTemplates) {
@@ -176,6 +188,7 @@ export class BankSmsParser implements MfsProviderParser {
             balanceBdt: parseBdtAmount(balMatch?.[1]),
             bankName: tpl.bank_name,
             reference: trxId,
+            transactionTime,
             confidence: Math.min(100, confidence),
             redactedBody: body,
             parserModule: `bankSmsParser:${tpl.sender_id}`,
@@ -220,6 +233,7 @@ export class BankSmsParser implements MfsProviderParser {
       balanceBdt: parseBdtAmount(balMatch?.[1]),
       bankName: profile?.bankName ?? 'Bangladesh Commercial Bank',
       reference: trxId,
+      transactionTime,
       confidence: Math.min(100, confidence),
       redactedBody: body,
       parserModule: 'bankSmsParser',

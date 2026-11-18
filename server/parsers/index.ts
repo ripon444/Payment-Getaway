@@ -5,7 +5,7 @@ import { CellfinParser } from './cellfinParser.ts';
 import { NagadParser } from './nagadParser.ts';
 import { RocketParser } from './rocketParser.ts';
 import type { MfsProviderParser, ParsedMfsNotification, RawNotificationInput } from './types.ts';
-import { containsSensitiveOtpOrPin, sanitizeSensitiveContent } from './types.ts';
+import { containsSensitiveOtpOrPin, extractTransactionTime, sanitizeSensitiveContent } from './types.ts';
 import { UpayParser } from './upayParser.ts';
 
 export const bankSmsParserInstance = new BankSmsParser();
@@ -41,6 +41,7 @@ export function parseMfsNotification(input: RawNotificationInput): ParsedMfsNoti
       balanceBdt: null,
       bankName: null,
       reference: null,
+      transactionTime: null,
       confidence: 0,
       redactedBody: '[REDACTED_OTP_OR_PIN_NOTIFICATION]',
       parserModule: 'securityFilter',
@@ -66,6 +67,7 @@ export function parseMfsNotification(input: RawNotificationInput): ParsedMfsNoti
     balanceBdt: null,
     bankName: null,
     reference: null,
+    transactionTime: extractTransactionTime(input.body, input.deviceTimestampMs),
     confidence: 0,
     redactedBody: sanitizeSensitiveContent(input.body),
     parserModule: 'none',

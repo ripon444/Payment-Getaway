@@ -23,6 +23,7 @@ export interface IngestResult {
   parsedAmountBdt: number | null;
   parsedTrxId: string | null;
   parsedBankName: string | null;
+  parsedTransactionTime: string | null;
   duplicate: boolean;
   duplicateReason?: string;
   candidatePaymentId: string | null;
@@ -114,9 +115,9 @@ export async function ingestDeviceNotification(req: IngestNotificationRequest): 
         id, device_id, merchant_id, source_channel, sim_slot, package_name, sender_header,
         provider, event_uid, event_hash, raw_title, raw_body_redacted, parsed_amount_bdt,
         parsed_trx_id, parsed_sender_phone, parsed_receiver_account, parsed_balance_bdt,
-        parsed_tx_type, parsed_bank_name, parser_module, parser_confidence, parse_status,
+        parsed_tx_type, parsed_bank_name, parsed_transaction_time, parser_module, parser_confidence, parse_status,
         duplicate_of_event_id, candidate_payment_id, device_timestamp_ms, received_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'DUPLICATE', ?, ?, ?, ?)`,
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'DUPLICATE', ?, ?, ?, ?)`,
       [
         dupId,
         req.deviceId,
@@ -137,6 +138,7 @@ export async function ingestDeviceNotification(req: IngestNotificationRequest): 
         parsed.balanceBdt,
         parsed.txType,
         parsed.bankName,
+        parsed.transactionTime,
         parsed.parserModule,
         parsed.confidence,
         existingHash.id,
@@ -185,6 +187,7 @@ export async function ingestDeviceNotification(req: IngestNotificationRequest): 
       parsedAmountBdt: parsed.amountBdt,
       parsedTrxId: parsed.trxId,
       parsedBankName: parsed.bankName,
+      parsedTransactionTime: parsed.transactionTime,
       duplicate: true,
       duplicateReason: 'Exact notification hash already recorded',
       candidatePaymentId: existingHash.candidate_payment_id,
@@ -222,9 +225,9 @@ export async function ingestDeviceNotification(req: IngestNotificationRequest): 
       id, device_id, merchant_id, source_channel, sim_slot, package_name, sender_header,
       provider, event_uid, event_hash, raw_title, raw_body_redacted, parsed_amount_bdt,
       parsed_trx_id, parsed_sender_phone, parsed_receiver_account, parsed_balance_bdt,
-      parsed_tx_type, parsed_bank_name, parser_module, parser_confidence, parse_status,
+      parsed_tx_type, parsed_bank_name, parsed_transaction_time, parser_module, parser_confidence, parse_status,
       duplicate_of_event_id, device_timestamp_ms, received_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       eventId,
       req.deviceId,
@@ -245,6 +248,7 @@ export async function ingestDeviceNotification(req: IngestNotificationRequest): 
       parsed.balanceBdt,
       parsed.txType,
       parsed.bankName,
+      parsed.transactionTime,
       parsed.parserModule,
       parsed.confidence,
       finalParseStatus,
@@ -301,6 +305,7 @@ export async function ingestDeviceNotification(req: IngestNotificationRequest): 
       parsedAmountBdt: parsed.amountBdt,
       parsedTrxId: parsed.trxId,
       parsedBankName: parsed.bankName,
+      parsedTransactionTime: parsed.transactionTime,
       duplicate: true,
       duplicateReason: alreadySettledTrx
         ? 'TrxID already verified & settled previously'
@@ -321,6 +326,7 @@ export async function ingestDeviceNotification(req: IngestNotificationRequest): 
       parsedAmountBdt: parsed.amountBdt,
       parsedTrxId: parsed.trxId,
       parsedBankName: parsed.bankName,
+      parsedTransactionTime: parsed.transactionTime,
       duplicate: false,
       candidatePaymentId: null,
       paymentStatusAfter: null,
@@ -446,6 +452,7 @@ export async function ingestDeviceNotification(req: IngestNotificationRequest): 
       parsedAmountBdt: parsed.amountBdt,
       parsedTrxId: parsed.trxId,
       parsedBankName: parsed.bankName,
+      parsedTransactionTime: parsed.transactionTime,
       duplicate: false,
       candidatePaymentId: null,
       paymentStatusAfter: null,
@@ -551,6 +558,7 @@ export async function ingestDeviceNotification(req: IngestNotificationRequest): 
     parsedAmountBdt: parsed.amountBdt,
     parsedTrxId: parsed.trxId,
     parsedBankName: parsed.bankName,
+    parsedTransactionTime: parsed.transactionTime,
     duplicate: false,
     candidatePaymentId: top.intent.id,
     paymentStatusAfter: nextStatus,

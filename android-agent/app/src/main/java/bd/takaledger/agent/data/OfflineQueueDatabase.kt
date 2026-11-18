@@ -19,7 +19,10 @@ import androidx.room.RoomDatabase
 data class QueuedNotificationEntity(
     @PrimaryKey val eventUid: String,
     val eventHash: String,
+    val sourceChannel: String = "NOTIFICATION",
     val packageName: String,
+    val senderHeader: String? = null,
+    val simSlot: Int? = null,
     val title: String?,
     val bodyRedacted: String,
     val deviceTimestampMs: Long,
@@ -50,7 +53,7 @@ interface QueuedNotificationDao {
     suspend fun pruneSyncedOlderThan(cutoffMs: Long)
 }
 
-@Database(entities = [QueuedNotificationEntity::class], version = 1, exportSchema = false)
+@Database(entities = [QueuedNotificationEntity::class], version = 2, exportSchema = false)
 abstract class OfflineQueueDatabase : RoomDatabase() {
     abstract fun dao(): QueuedNotificationDao
 
@@ -64,7 +67,7 @@ abstract class OfflineQueueDatabase : RoomDatabase() {
                     context.applicationContext,
                     OfflineQueueDatabase::class.java,
                     "takaledger_offline_queue.db"
-                ).build().also { INSTANCE = it }
+                ).fallbackToDestructiveMigration().build().also { INSTANCE = it }
             }
         }
     }

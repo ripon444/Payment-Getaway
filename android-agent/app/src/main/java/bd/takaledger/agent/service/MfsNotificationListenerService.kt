@@ -56,7 +56,10 @@ class MfsNotificationListenerService : NotificationListenerService() {
         val entity = QueuedNotificationEntity(
             eventUid = UUID.randomUUID().toString(),
             eventHash = eventHash,
+            sourceChannel = "NOTIFICATION",
             packageName = pkg,
+            senderHeader = null,
+            simSlot = null,
             title = title,
             bodyRedacted = redactedBody,
             deviceTimestampMs = ts
@@ -97,6 +100,7 @@ class MfsNotificationListenerService : NotificationListenerService() {
             "com.dbbl.mfs.rocket",
             "com.dbbl.rocket",
             "com.ucb.upay",
+            "bd.com.upay.customer",
             "bd.com.upay.agent",
             "bd.com.upay.merchant",
             "com.ibbl.cellfin",
@@ -122,18 +126,38 @@ class MfsNotificationListenerService : NotificationListenerService() {
 
         fun containsPaymentKeyword(content: String): Boolean {
             val lower = content.lowercase()
-            return lower.contains("bkash") ||
+            val hasMfsOrBankKeyword =
+                lower.contains("bkash") ||
                 lower.contains("nagad") ||
                 lower.contains("rocket") ||
                 lower.contains("upay") ||
                 lower.contains("cellfin") ||
                 lower.contains("banglaqr") ||
                 lower.contains("bangla qr") ||
+                lower.contains("npsb") ||
+                lower.contains("beftn") ||
+                lower.contains("rtgs") ||
                 lower.contains("credited") ||
+                lower.contains("deposited") ||
+                lower.contains("citybank") ||
+                lower.contains("city bank") ||
+                lower.contains("bracbank") ||
+                lower.contains("brac bank") ||
+                lower.contains("dbbl") ||
+                lower.contains("ebl") ||
+                lower.contains("ibbl") ||
+                lower.contains("prime bank") ||
+                lower.contains("sonali bank") ||
                 lower.contains("16247") ||
                 lower.contains("16167") ||
                 lower.contains("16216") ||
                 lower.contains("16268")
+
+            val hasIncomingAmountPhrase =
+                (lower.contains("received") || lower.contains("credited") || lower.contains("deposited")) &&
+                (lower.contains("tk") || lower.contains("bdt"))
+
+            return hasMfsOrBankKeyword || hasIncomingAmountPhrase
         }
 
         fun sanitizeBody(body: String): String {

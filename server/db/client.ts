@@ -181,6 +181,7 @@ const SQLITE_SCHEMA_STATEMENTS = [
     parsed_balance_bdt REAL NULL,
     parsed_tx_type TEXT NULL,
     parsed_bank_name TEXT NULL,
+    parsed_transaction_time TEXT NULL,
     parser_module TEXT NULL,
     parser_confidence INTEGER NOT NULL DEFAULT 0,
     parse_status TEXT NOT NULL,
@@ -293,6 +294,7 @@ const SAFE_SQLITE_MIGRATIONS = [
   "ALTER TABLE notification_events ADD COLUMN sender_header TEXT NULL",
   "ALTER TABLE notification_events ADD COLUMN parsed_receiver_account TEXT NULL",
   "ALTER TABLE notification_events ADD COLUMN parsed_bank_name TEXT NULL",
+  "ALTER TABLE notification_events ADD COLUMN parsed_transaction_time TEXT NULL",
   "ALTER TABLE notification_events ADD COLUMN parser_module TEXT NULL",
   // Migrate legacy status labels from v1 seed if present
   "UPDATE payment_intents SET status = 'PENDING' WHERE status = 'CREATED'",

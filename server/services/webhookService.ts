@@ -28,7 +28,17 @@ export async function dispatchMerchantWebhook(params: {
     [params.merchantId],
   );
 
-  if (!merchant || !merchant.webhook_url) {
+  const site = await db.queryOne<{ callback_url: string | null }>(
+    `SELECT mw.callback_url
+     FROM payment_intents p
+     JOIN merchant_websites mw ON mw.id = p.website_id
+     WHERE p.id = ? AND mw.is_active = 1`,
+    [params.paymentIntentId],
+  );
+
+  const targetUrl = site?.callback_url?.trim() || merchant?.webhook_url?.trim() || null;
+
+  if (!merchant || !targetUrl) {
     return { deliveryId: null, status: 'SKIPPED_NO_WEBHOOK_URL' };
   }
 
@@ -66,7 +76,7 @@ export async function dispatchMerchantWebhook(params: {
       params.merchantId,
       params.paymentIntentId,
       params.eventType,
-      merchant.webhook_url,
+      targetUrl,
       rawBody,
       signatureHeader,
       now,

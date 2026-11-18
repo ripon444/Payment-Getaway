@@ -45,7 +45,10 @@ class EventSyncWorker(
                 eventsArray.put(
                     JSONObject().apply {
                         put("eventUid", item.eventUid)
+                        put("sourceChannel", item.sourceChannel)
                         put("packageName", item.packageName)
+                        put("senderHeader", item.senderHeader ?: JSONObject.NULL)
+                        put("simSlot", item.simSlot ?: JSONObject.NULL)
                         put("title", item.title ?: JSONObject.NULL)
                         put("body", item.bodyRedacted)
                         put("deviceTimestampMs", item.deviceTimestampMs)

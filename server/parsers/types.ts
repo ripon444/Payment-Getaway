@@ -33,6 +33,7 @@ export interface ParsedMfsNotification {
   balanceBdt: number | null;
   bankName: string | null;
   reference: string | null;
+  transactionTime: string | null;
   confidence: number;
   redactedBody: string;
   parserModule: string;
@@ -79,4 +80,45 @@ export function parseBdtAmount(raw?: string | null): number | null {
   const num = Number.parseFloat(cleaned);
   if (!Number.isFinite(num) || num <= 0) return null;
   return Math.round(num * 100) / 100;
+}
+
+export function extractSmsSenderFromPackage(packageName?: string | null, senderHeader?: string | null): string {
+  const trimmedHeader = (senderHeader ?? '').trim();
+  if (trimmedHeader) return trimmedHeader;
+  const pkg = (packageName ?? '').trim();
+  if (pkg.toLowerCase().startsWith('sms:')) {
+    return pkg.slice(4).trim();
+  }
+  return '';
+}
+
+export function extractMfsReceiverAccount(body: string): string | null {
+  const m =
+    body.match(/\bto\s+(?:A\/C\s*)?(?:\+?88)?(01\d{9,10})\b/i) ||
+    body.match(/\b(?:to|receiver|credited\s+to)\s+A\/C\s*[:#-]?\s*([*\d]{4,18})\b/i) ||
+    body.match(/\bMerchant\s*[:#-]?\s*([A-Za-z0-9*_-]{4,20})\b/i);
+  return m?.[1]?.trim() ?? null;
+}
+
+export function extractTransactionTime(body: string, deviceTimestampMs?: number): string | null {
+  const patterns: RegExp[] = [
+    // e.g. at 17/11/2026 23:40 or Date: 17-11-2026 02:15 PM or on 17/11/26 14:20:05
+    /\b(?:at|on|date|time)?\s*[:#-]?\s*(\d{1,2}[\/-]\d{1,2}[\/-]\d{2,4}(?:\s+\d{1,2}:\d{2}(?::\d{2})?(?:\s*[AP]M)?)?)/i,
+    // e.g. on 17-Nov-26 14:22 or 17-Nov-2026 02:15 PM
+    /\b(?:on|at|date)?\s*[:#-]?\s*(\d{1,2}[-\s][A-Za-z]{3}[-\s]\d{2,4}(?:\s+\d{1,2}:\d{2}(?::\d{2})?(?:\s*[AP]M)?)?)/i,
+    // e.g. 2026-11-17 14:22:10
+    /\b(\d{4}-\d{2}-\d{2}(?:[T\s]\d{2}:\d{2}(?::\d{2})?)?)\b/,
+  ];
+
+  for (const re of patterns) {
+    const m = body.match(re);
+    if (m?.[1]) {
+      return m[1].trim();
+    }
+  }
+
+  if (typeof deviceTimestampMs === 'number' && Number.isFinite(deviceTimestampMs) && deviceTimestampMs > 0) {
+    return new Date(deviceTimestampMs).toISOString();
+  }
+  return null;
 }
