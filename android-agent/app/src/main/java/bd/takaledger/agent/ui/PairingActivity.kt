@@ -17,7 +17,9 @@ import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
+import androidx.work.Constraints
 import androidx.work.ExistingPeriodicWorkPolicy
+import androidx.work.NetworkType
 import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
 import bd.takaledger.agent.crypto.DeviceCryptoStore
@@ -208,10 +210,15 @@ class PairingActivity : AppCompatActivity() {
     }
 
     private fun schedulePeriodicSync() {
-        val work = PeriodicWorkRequestBuilder<EventSyncWorker>(15, TimeUnit.MINUTES).build()
+        val constraints = Constraints.Builder()
+            .setRequiredNetworkType(NetworkType.CONNECTED)
+            .build()
+        val work = PeriodicWorkRequestBuilder<EventSyncWorker>(15, TimeUnit.MINUTES)
+            .setConstraints(constraints)
+            .build()
         WorkManager.getInstance(applicationContext).enqueueUniquePeriodicWork(
             "takaledger_periodic_heartbeat",
-            ExistingPeriodicWorkPolicy.KEEP,
+            ExistingPeriodicWorkPolicy.UPDATE,
             work
         )
     }

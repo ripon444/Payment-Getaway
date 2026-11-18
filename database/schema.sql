@@ -220,6 +220,7 @@ CREATE TABLE IF NOT EXISTS notification_events (
   parsed_balance_bdt DECIMAL(14, 2) NULL,
   parsed_tx_type VARCHAR(64) NULL,
   parsed_bank_name VARCHAR(100) NULL,
+  parsed_transaction_time VARCHAR(64) NULL,
   parser_module VARCHAR(64) NULL,
   parser_confidence INT NOT NULL DEFAULT 0,
   parse_status ENUM('PARSED', 'UNPARSED', 'DUPLICATE', 'IGNORED_SECURITY') NOT NULL,

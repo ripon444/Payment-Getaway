@@ -1,7 +1,15 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
     id("com.google.devtools.ksp")
+}
+
+val keystorePropsFile = rootProject.file("keystore.properties")
+val keystoreProps = Properties()
+if (keystorePropsFile.exists()) {
+    keystorePropsFile.inputStream().use { keystoreProps.load(it) }
 }
 
 android {
@@ -12,18 +20,50 @@ android {
         applicationId = "bd.takaledger.agent"
         minSdk = 26
         targetSdk = 34
-        versionCode = 142
-        versionName = "1.4.2"
+        versionCode = 200
+        versionName = "2.0.0"
+    }
+
+    signingConfigs {
+        create("release") {
+            val storePath = keystoreProps.getProperty("storeFile")
+                ?: System.getenv("TAKALEDGER_KEYSTORE_PATH")
+            val storePass = keystoreProps.getProperty("storePassword")
+                ?: System.getenv("TAKALEDGER_KEYSTORE_PASSWORD")
+            val alias = keystoreProps.getProperty("keyAlias")
+                ?: System.getenv("TAKALEDGER_KEY_ALIAS")
+            val aliasPass = keystoreProps.getProperty("keyPassword")
+                ?: System.getenv("TAKALEDGER_KEY_PASSWORD")
+
+            if (!storePath.isNullOrBlank() && !storePass.isNullOrBlank() && !alias.isNullOrBlank() && !aliasPass.isNullOrBlank()) {
+                storeFile = file(storePath)
+                storePassword = storePass
+                keyAlias = alias
+                keyPassword = aliasPass
+            }
+        }
     }
 
     buildTypes {
+        debug {
+            isMinifyEnabled = false
+        }
         release {
             isMinifyEnabled = true
+            isShrinkResources = true
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
+            val releaseConfig = signingConfigs.findByName("release")
+            if (releaseConfig?.storeFile != null) {
+                signingConfig = releaseConfig
+            }
         }
+    }
+
+    buildFeatures {
+        buildConfig = true
     }
 
     compileOptions {

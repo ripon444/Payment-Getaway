@@ -2,7 +2,15 @@ node_modules/
 build/
 dist/
 coverage/
+data/
 .DS_Store
 *.log
+*.zip
 .env*
 !.env.example
+*.jks
+*.keystore
+keystore.properties
+android-agent/.gradle/
+android-agent/local.properties
+android-agent/app/build/

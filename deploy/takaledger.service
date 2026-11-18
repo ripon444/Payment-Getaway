@@ -1,0 +1,20 @@
+[Unit]
+Description=TakaLedger Multi-Merchant Payment Verification Gateway
+After=network.target mysql.service
+
+[Service]
+Type=simple
+User=www-data
+Group=www-data
+WorkingDirectory=/opt/takaledger
+Environment=NODE_ENV=production
+EnvironmentFile=/opt/takaledger/.env
+ExecStart=/usr/bin/node /opt/takaledger/server.ts
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=takaledger-gateway
+
+[Install]
+WantedBy=multi-user.target
