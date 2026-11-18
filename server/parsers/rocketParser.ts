@@ -11,7 +11,6 @@ export class RocketParser implements MfsProviderParser {
     return (
       this.knownPackages.some((p) => p.toLowerCase() === pkg) ||
       combined.includes('rocket') ||
-      combined.includes('dbbl') ||
       combined.includes('16216')
     );
   }
@@ -23,12 +22,14 @@ export class RocketParser implements MfsProviderParser {
       return {
         provider: 'ROCKET',
         parseStatus: 'IGNORED_SECURITY',
+        accountMode: null,
         txType: null,
         amountBdt: null,
         trxId: null,
         senderPhone: null,
-        receiverPhone: null,
+        receiverAccount: null,
         balanceBdt: null,
+        bankName: 'DBBL Rocket',
         reference: null,
         confidence: 0,
         redactedBody: '[REDACTED_OTP_OR_PIN_NOTIFICATION]',
@@ -41,6 +42,8 @@ export class RocketParser implements MfsProviderParser {
     const warnings: string[] = [];
 
     let txType: string | null = null;
+    let accountMode: 'PERSONAL' | 'MERCHANT' = /merchant\s*pay/i.test(body) ? 'MERCHANT' : 'PERSONAL';
+
     if (/cash[\s-]*in/i.test(body)) txType = 'CASH_IN';
     else if (/merchant\s*pay/i.test(body)) txType = 'MERCHANT_PAY';
     else if (/received/i.test(body)) txType = 'P2P_RECEIVED';
@@ -50,12 +53,14 @@ export class RocketParser implements MfsProviderParser {
       return {
         provider: 'ROCKET',
         parseStatus: 'UNPARSED',
+        accountMode,
         txType: 'OUTGOING_DEBIT',
         amountBdt: null,
         trxId: null,
         senderPhone: null,
-        receiverPhone: null,
+        receiverAccount: null,
         balanceBdt: null,
+        bankName: 'DBBL Rocket',
         reference: null,
         confidence: 15,
         redactedBody: body,
@@ -88,17 +93,17 @@ export class RocketParser implements MfsProviderParser {
     if (!amountBdt) warnings.push('Missing Rocket BDT amount');
     if (!trxId) warnings.push('Missing Rocket TxnId');
 
-    const parseStatus = amountBdt !== null && trxId !== null ? 'PARSED' : 'UNPARSED';
-
     return {
       provider: 'ROCKET',
-      parseStatus,
+      parseStatus: amountBdt !== null && trxId !== null ? 'PARSED' : 'UNPARSED',
+      accountMode,
       txType: txType ?? 'INCOMING',
       amountBdt,
       trxId,
       senderPhone,
-      receiverPhone: null,
+      receiverAccount: null,
       balanceBdt,
+      bankName: 'DBBL Rocket',
       reference,
       confidence,
       redactedBody: body,

@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useState } from 'react';
-import { ArrowLeft, CheckCircle2, Clock, Copy, ShieldCheck } from 'lucide-react';
+import { ArrowLeft, CheckCircle2, Clock, Copy, QrCode, ShieldCheck } from 'lucide-react';
 import { apiFetch, formatBdt } from '../lib/api.ts';
-import type { ProviderCode } from '../types/gateway.ts';
+import { createGatewaySocket } from '../lib/socket.ts';
+import { ALL_PROVIDERS, type ProviderCode } from '../types/gateway.ts';
 import { PaymentStatusLabel, ProviderLabel } from './StatusText.tsx';
 
 interface CheckoutData {
@@ -22,6 +23,7 @@ interface CheckoutData {
     account_number: string;
     account_type: string;
     account_title: string;
+    bank_name?: string | null;
   } | null;
   availableWallets: Array<{
     id: string;
@@ -29,8 +31,11 @@ interface CheckoutData {
     account_number: string;
     account_type: string;
     account_title: string;
+    bank_name?: string | null;
   }>;
   qrDataUrl: string;
+  banglaQrString?: string;
+  banglaQrDataUrl?: string;
 }
 
 export function CheckoutPage({ paymentId }: { paymentId: string }) {
@@ -44,6 +49,7 @@ export function CheckoutPage({ paymentId }: { paymentId: string }) {
   const [submitting, setSubmitting] = useState(false);
   const [submitMsg, setSubmitMsg] = useState<string | null>(null);
   const [copiedWallet, setCopiedWallet] = useState(false);
+  const [copiedQr, setCopiedQr] = useState(false);
 
   const loadCheckout = useCallback(async () => {
     try {
@@ -53,26 +59,42 @@ export function CheckoutPage({ paymentId }: { paymentId: string }) {
         false,
       );
       setCheckout(res.checkout);
-      setSelectedProvider(res.checkout.provider);
-      if (res.checkout.submittedSenderPhone && !senderPhone) {
-        setSenderPhone(res.checkout.submittedSenderPhone);
-      }
-      if (res.checkout.submittedTrxId && !trxId) {
-        setTrxId(res.checkout.submittedTrxId);
-      }
+      setSelectedProvider((prev) => prev || res.checkout.provider);
+      setSenderPhone((prev) => prev || res.checkout.submittedSenderPhone || '');
+      setTrxId((prev) => prev || res.checkout.submittedTrxId || '');
       setError(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Checkout session unavailable');
     } finally {
       setLoading(false);
     }
-  }, [paymentId, senderPhone, trxId]);
+  }, [paymentId]);
 
   useEffect(() => {
-    loadCheckout();
-    const timer = setInterval(loadCheckout, 10_000);
-    return () => clearInterval(timer);
-  }, [loadCheckout]);
+    apiFetch<{ checkout: CheckoutData }>(`/api/checkout/${paymentId}`, {}, false)
+      .then((res) => {
+        setCheckout(res.checkout);
+        setSelectedProvider(res.checkout.provider);
+        if (res.checkout.submittedSenderPhone) setSenderPhone(res.checkout.submittedSenderPhone);
+        if (res.checkout.submittedTrxId) setTrxId(res.checkout.submittedTrxId);
+        setLoading(false);
+      })
+      .catch((err) => {
+        setError(err instanceof Error ? err.message : 'Checkout session unavailable');
+        setLoading(false);
+      });
+
+    const socket = createGatewaySocket({ checkoutId: paymentId });
+    socket.on('checkout:status', () => {
+      loadCheckout();
+    });
+
+    const timer = setInterval(loadCheckout, 12_000);
+    return () => {
+      clearInterval(timer);
+      socket.disconnect();
+    };
+  }, [paymentId, loadCheckout]);
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -131,11 +153,21 @@ export function CheckoutPage({ paymentId }: { paymentId: string }) {
     checkout.availableWallets.find((w) => w.provider === selectedProvider) ||
     checkout.receiverWallet;
 
-  const isSettled = checkout.status === 'VERIFIED_SETTLED';
+  const isSettled = checkout.status === 'SUCCESS';
+  const isFailedOrExpired = checkout.status === 'FAILED' || checkout.status === 'EXPIRED';
+
+  const displayedMethods =
+    checkout.availableWallets.length > 0
+      ? ALL_PROVIDERS.filter(
+          (p) =>
+            p.code === checkout.provider ||
+            checkout.availableWallets.some((w) => w.provider === p.code),
+        )
+      : ALL_PROVIDERS;
 
   return (
     <div className="min-h-screen bg-slate-50 py-8 px-4 sm:px-6">
-      <div className="max-w-3xl mx-auto space-y-5">
+      <div className="max-w-4xl mx-auto space-y-5">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2 text-slate-900 font-semibold text-sm">
             <ShieldCheck className="h-4 w-4 text-teal-700" />
@@ -146,12 +178,12 @@ export function CheckoutPage({ paymentId }: { paymentId: string }) {
             className="inline-flex items-center gap-1.5 text-xs font-medium text-slate-600 hover:text-slate-900"
           >
             <ArrowLeft className="h-3.5 w-3.5" />
-            <span>Admin Console</span>
+            <span>Gateway Console</span>
           </a>
         </div>
 
         <div className="bg-white border border-slate-200 rounded-xl overflow-hidden grid grid-cols-1 md:grid-cols-12">
-          {/* Left Column: Merchant Order Summary & Receiver Instructions */}
+          {/* Left Column */}
           <div className="md:col-span-5 bg-slate-900 text-slate-100 p-6 flex flex-col justify-between space-y-6">
             <div className="space-y-4">
               <div>
@@ -171,34 +203,42 @@ export function CheckoutPage({ paymentId }: { paymentId: string }) {
 
               <div className="pt-4 border-t border-slate-800 space-y-2 text-xs text-slate-300">
                 <p className="font-medium text-white">Payment Steps</p>
-                <p>1. Select your MFS wallet provider on the right.</p>
-                <p>2. Open bKash, Nagad, or Rocket app and send exact amount to the wallet number below.</p>
-                <p>3. Enter reference <span className="font-mono text-white">{checkout.referenceCode}</span> if prompted, then submit your TrxID.</p>
+                <p>1. Select bKash, Nagad, Rocket, Upay, CellFin, Bangla QR, or Bank transfer.</p>
+                <p>2. Send the exact amount to the displayed wallet/account or scan Bangla QR.</p>
+                <p>
+                  3. Enter reference <span className="font-mono text-white">{checkout.referenceCode}</span> if asked, then submit your Transaction ID below.
+                </p>
               </div>
             </div>
 
-            {checkout.qrDataUrl && (
+            {(checkout.banglaQrDataUrl || checkout.qrDataUrl) && (
               <div className="pt-4 border-t border-slate-800 flex items-center gap-3">
                 <img
-                  src={checkout.qrDataUrl}
-                  alt="MFS Payment QR"
-                  className="w-16 h-16 bg-white p-1 rounded"
+                  src={selectedProvider === 'BANGLA_QR' && checkout.banglaQrDataUrl ? checkout.banglaQrDataUrl : checkout.qrDataUrl}
+                  alt="Payment QR"
+                  className="w-20 h-20 bg-white p-1 rounded shrink-0"
                 />
                 <div className="text-xs text-slate-300">
-                  <p className="font-medium text-white">Scan Reference QR</p>
-                  <p className="text-slate-400">Contains wallet, amount, and order reference</p>
+                  <p className="font-medium text-white">
+                    {selectedProvider === 'BANGLA_QR' ? 'EMVCo Bangla QR' : 'Payment Reference QR'}
+                  </p>
+                  <p className="text-slate-400 mt-0.5">
+                    {selectedProvider === 'BANGLA_QR'
+                      ? 'Scan with Citytouch, bKash, Nagad, Rocket, or CellFin'
+                      : 'Encodes wallet, BDT amount, and reference code'}
+                  </p>
                 </div>
               </div>
             )}
           </div>
 
-          {/* Right Column: Wallet Selection & TrxID Submission */}
+          {/* Right Column */}
           <div className="md:col-span-7 p-6 space-y-5">
             <div className="flex items-center justify-between border-b border-slate-200 pb-3">
               <PaymentStatusLabel status={checkout.status} />
               <span className="inline-flex items-center gap-1 text-xs text-slate-500 font-mono">
                 <Clock className="h-3.5 w-3.5" />
-                <span>BDT Checkout</span>
+                <span>BDT Live Session</span>
               </span>
             </div>
 
@@ -206,36 +246,76 @@ export function CheckoutPage({ paymentId }: { paymentId: string }) {
               <div className="p-5 bg-emerald-50 border border-emerald-200 rounded-xl space-y-2">
                 <div className="flex items-center gap-2 text-emerald-900 font-semibold text-sm">
                   <CheckCircle2 className="h-5 w-5" />
-                  <span>Payment Verified & Settled</span>
+                  <span>Payment Verified & Settled (SUCCESS)</span>
                 </div>
                 <p className="text-xs text-emerald-800">
                   Transaction <span className="font-mono font-semibold">{checkout.submittedTrxId}</span> for{' '}
                   <span className="font-mono font-semibold">{formatBdt(checkout.amountBdt)}</span> has been verified and confirmed to {checkout.merchantName}.
                 </p>
               </div>
+            ) : isFailedOrExpired ? (
+              <div className="p-5 bg-rose-50 border border-rose-200 rounded-xl space-y-2">
+                <p className="text-sm font-semibold text-rose-900">Session {checkout.status}</p>
+                <p className="text-xs text-rose-800">
+                  Please initiate a new checkout session from the merchant store.
+                </p>
+              </div>
             ) : (
               <>
                 <div>
                   <label className="block text-xs font-medium text-slate-700 mb-2">
-                    Select MFS Method
+                    Select Payment Method
                   </label>
-                  <div className="grid grid-cols-3 gap-2">
-                    {(['BKASH', 'NAGAD', 'ROCKET'] as ProviderCode[]).map((p) => (
+                  <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                    {displayedMethods.map((p) => (
                       <button
-                        key={p}
+                        key={p.code}
                         type="button"
-                        onClick={() => setSelectedProvider(p)}
+                        onClick={() => setSelectedProvider(p.code)}
                         className={`p-2.5 rounded-lg border text-left transition-colors ${
-                          selectedProvider === p
+                          selectedProvider === p.code
                             ? 'border-teal-700 bg-teal-50/60'
                             : 'border-slate-200 bg-white hover:bg-slate-50'
                         }`}
                       >
-                        <ProviderLabel provider={p} />
+                        <ProviderLabel provider={p.code} />
                       </button>
                     ))}
                   </div>
                 </div>
+
+                {selectedProvider === 'BANGLA_QR' && checkout.banglaQrDataUrl && (
+                  <div className="p-4 bg-teal-50/50 border border-teal-200 rounded-xl flex flex-col sm:flex-row items-center gap-4">
+                    <img
+                      src={checkout.banglaQrDataUrl}
+                      alt="Bangla QR Code"
+                      className="w-32 h-32 bg-white p-1.5 border border-teal-200 rounded-lg shrink-0"
+                    />
+                    <div className="space-y-2 text-xs min-w-0">
+                      <div className="flex items-center gap-1.5 font-semibold text-teal-900">
+                        <QrCode className="h-4 w-4" />
+                        <span>Scan Bangla QR (NPSB Interoperable)</span>
+                      </div>
+                      <p className="text-slate-700 leading-relaxed">
+                        Reliable SMS/Push correlation via <strong>City Bank (Citytouch), DBBL NexusPay/Rocket, Islami Bank CellFin, bKash, & Nagad</strong>.
+                      </p>
+                      {checkout.banglaQrString && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            navigator.clipboard.writeText(checkout.banglaQrString!);
+                            setCopiedQr(true);
+                            setTimeout(() => setCopiedQr(false), 1500);
+                          }}
+                          className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium text-teal-800 bg-white border border-teal-300 rounded-md"
+                        >
+                          <Copy className="h-3 w-3" />
+                          <span>{copiedQr ? 'EMVCo Payload Copied' : 'Copy EMVCo QR Payload'}</span>
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                )}
 
                 {activeWallet && (
                   <div className="p-4 bg-slate-50 border border-slate-200 rounded-lg flex items-center justify-between gap-3">
@@ -246,7 +326,10 @@ export function CheckoutPage({ paymentId }: { paymentId: string }) {
                       <p className="text-lg font-mono font-semibold text-slate-900 mt-0.5">
                         {activeWallet.account_number}
                       </p>
-                      <p className="text-xs text-slate-600">{activeWallet.account_title}</p>
+                      <p className="text-xs text-slate-600">
+                        {activeWallet.account_title}
+                        {activeWallet.bank_name ? ` · ${activeWallet.bank_name}` : ''}
+                      </p>
                     </div>
                     <button
                       type="button"
@@ -280,14 +363,14 @@ export function CheckoutPage({ paymentId }: { paymentId: string }) {
 
                   <div>
                     <label className="block text-xs font-medium text-slate-700 mb-1">
-                      Transaction ID (TrxID)
+                      Transaction ID / Bank Reference (TrxID)
                     </label>
                     <input
                       type="text"
                       required
                       value={trxId}
                       onChange={(e) => setTrxId(e.target.value.toUpperCase())}
-                      placeholder="e.g. BKH7721K9P"
+                      placeholder="e.g. BKH7721K9P or BQR551908X"
                       className="w-full px-3.5 py-2.5 text-sm font-mono uppercase border border-slate-300 rounded-lg focus:outline-none focus:border-teal-700"
                     />
                   </div>
@@ -314,7 +397,7 @@ export function CheckoutPage({ paymentId }: { paymentId: string }) {
                 </form>
 
                 <p className="text-xs text-slate-500">
-                  Final settlement completes only after official provider API confirmation or finance verification.
+                  Incoming device alerts move this session to MATCHED. Final SUCCESS confirmation completes after official Provider API or finance verification.
                 </p>
               </>
             )}

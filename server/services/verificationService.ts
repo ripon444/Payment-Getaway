@@ -1,5 +1,6 @@
 import { env } from '../config/env.ts';
 import { getDb, isoNow } from '../db/client.ts';
+import { emitPaymentUpdated } from '../realtime/socket.ts';
 import { newId } from '../utils/crypto.ts';
 import { recordAuditLog } from './auditService.ts';
 import { dispatchMerchantWebhook } from './webhookService.ts';
@@ -9,7 +10,7 @@ interface PaymentRow {
   merchant_id: string;
   wallet_id: string | null;
   merchant_order_id: string;
-  provider: 'BKASH' | 'NAGAD' | 'ROCKET';
+  provider: string;
   amount_bdt: number;
   submitted_trx_id: string | null;
   status: string;
@@ -39,7 +40,7 @@ export async function verifyPaymentManually(params: {
 
   if (!params.documentaryEvidenceRef || params.documentaryEvidenceRef.trim().length < 5) {
     throw new VerificationError(
-      'Independent documentary evidence reference (min 5 characters, e.g. merchant portal statement or bank settlement ref) is mandatory.',
+      'Independent documentary evidence reference (min 5 characters, e.g. merchant portal or bank statement ref) is mandatory.',
       400,
     );
   }
@@ -55,8 +56,8 @@ export async function verifyPaymentManually(params: {
   if (!payment) {
     throw new VerificationError('Payment intent not found.', 404);
   }
-  if (payment.status === 'VERIFIED_SETTLED') {
-    throw new VerificationError('Payment is already verified and settled.', 409);
+  if (payment.status === 'SUCCESS') {
+    throw new VerificationError('Payment is already verified and settled (SUCCESS).', 409);
   }
 
   const normalizedTrx = params.providerTrxId.trim().toUpperCase();
@@ -69,14 +70,14 @@ export async function verifyPaymentManually(params: {
     );
     if (existingTrx) {
       throw new VerificationError(
-        `Duplicate TrxID blocked: ${normalizedTrx} has already been settled for payment ${existingTrx.payment_intent_id}.`,
+        `Duplicate TrxID blocked: ${normalizedTrx} has already been verified for payment ${existingTrx.payment_intent_id}.`,
         409,
       );
     }
 
     if (Math.abs(Number(payment.amount_bdt) - Number(params.verifiedAmountBdt)) > 0.01) {
       throw new VerificationError(
-        `Verified amount (${params.verifiedAmountBdt} BDT) must match payment intent amount (${payment.amount_bdt} BDT).`,
+        `Verified amount (${params.verifiedAmountBdt} BDT) must match session amount (${payment.amount_bdt} BDT).`,
         400,
       );
     }
@@ -84,7 +85,7 @@ export async function verifyPaymentManually(params: {
 
   const verificationId = newId();
   const now = isoNow();
-  const nextStatus = params.decision === 'VERIFIED' ? 'VERIFIED_SETTLED' : 'REJECTED';
+  const nextStatus = params.decision === 'VERIFIED' ? 'SUCCESS' : 'FAILED';
 
   await db.withTransaction(async (tx) => {
     await tx.execute(
@@ -112,18 +113,31 @@ export async function verifyPaymentManually(params: {
     );
 
     await tx.execute(
-      'UPDATE payment_intents SET status = ?, submitted_trx_id = COALESCE(submitted_trx_id, ?), updated_at = ? WHERE id = ?',
-      [nextStatus, normalizedTrx, now, payment.id],
+      `UPDATE payment_intents
+       SET status = ?, submitted_trx_id = COALESCE(submitted_trx_id, ?),
+           verified_at = ?, settled_at = ?, updated_at = ?
+       WHERE id = ?`,
+      [
+        nextStatus,
+        normalizedTrx,
+        params.decision === 'VERIFIED' ? now : null,
+        params.decision === 'VERIFIED' ? now : null,
+        now,
+        payment.id,
+      ],
     );
 
-    if (params.decision === 'VERIFIED' && payment.wallet_id) {
-      await tx.execute(
-        'UPDATE mfs_wallets SET daily_received_bdt = daily_received_bdt + ? WHERE id = ?',
-        [params.verifiedAmountBdt, payment.wallet_id],
-      );
-    }
-
     if (params.decision === 'VERIFIED') {
+      if (payment.wallet_id) {
+        await tx.execute(
+          'UPDATE mfs_wallets SET daily_received_bdt = daily_received_bdt + ? WHERE id = ?',
+          [params.verifiedAmountBdt, payment.wallet_id],
+        );
+      }
+      await tx.execute(
+        'UPDATE merchants SET settled_balance_bdt = settled_balance_bdt + ? WHERE id = ?',
+        [params.verifiedAmountBdt, payment.merchant_id],
+      );
       await tx.execute(
         `UPDATE payment_match_candidates SET status = 'SELECTED'
          WHERE payment_intent_id = ? AND notification_event_id = ?`,
@@ -132,14 +146,19 @@ export async function verifyPaymentManually(params: {
     }
   });
 
+  emitPaymentUpdated({
+    paymentId: payment.id,
+    merchantId: payment.merchant_id,
+    status: nextStatus,
+    provider: payment.provider,
+    amountBdt: Number(payment.amount_bdt),
+  });
+
   await recordAuditLog({
     actorType: 'USER',
     actorId: params.verifierUserId,
     actorEmail: params.verifierEmail,
-    action:
-      params.decision === 'VERIFIED'
-        ? 'PAYMENT_MANUALLY_VERIFIED_SETTLED'
-        : 'PAYMENT_MANUALLY_REJECTED',
+    action: params.decision === 'VERIFIED' ? 'PAYMENT_MANUALLY_VERIFIED_SUCCESS' : 'PAYMENT_MANUALLY_FAILED',
     resourceType: 'payment_intent',
     resourceId: payment.id,
     ipAddress: params.ipAddress ?? null,
@@ -156,7 +175,7 @@ export async function verifyPaymentManually(params: {
   await dispatchMerchantWebhook({
     merchantId: payment.merchant_id,
     paymentIntentId: payment.id,
-    eventType: params.decision === 'VERIFIED' ? 'payment.verified_settled' : 'payment.rejected',
+    eventType: params.decision === 'VERIFIED' ? 'payment.verified_settled' : 'payment.failed',
     payload: {
       paymentId: payment.id,
       merchantOrderId: payment.merchant_order_id,
@@ -189,8 +208,8 @@ export async function verifyPaymentViaProviderApi(params: {
   if (!payment) {
     throw new VerificationError('Payment intent not found.', 404);
   }
-  if (payment.status === 'VERIFIED_SETTLED') {
-    throw new VerificationError('Payment is already verified and settled.', 409);
+  if (payment.status === 'SUCCESS') {
+    throw new VerificationError('Payment is already settled (SUCCESS).', 409);
   }
 
   const trxId = (params.providerTrxId || payment.submitted_trx_id || '').trim().toUpperCase();
@@ -198,14 +217,13 @@ export async function verifyPaymentViaProviderApi(params: {
     throw new VerificationError('Transaction ID is required for provider verification.', 400);
   }
 
-  // Strictly require real configured provider API credentials. Never fabricate provider approval.
   let providerPayload: Record<string, unknown> | null = null;
   let documentaryRef = '';
 
   if (payment.provider === 'BKASH') {
     if (!env.providers.bkashAppKey || !env.providers.bkashAppSecret || !env.providers.bkashUsername || !env.providers.bkashPassword) {
       throw new VerificationError(
-        'Official bKash Tokenized Checkout API credentials are not configured in environment variables. Configure BKASH_APP_KEY/SECRET/USERNAME/PASSWORD or use Documented Manual Finance Verification.',
+        'Official bKash Tokenized Checkout API credentials are not configured in .env. Configure them or perform Documented Manual Finance Verification.',
         422,
       );
     }
@@ -224,10 +242,7 @@ export async function verifyPaymentViaProviderApi(params: {
     });
     const tokenJson = (await tokenRes.json()) as { id_token?: string; statusMessage?: string };
     if (!tokenRes.ok || !tokenJson.id_token) {
-      throw new VerificationError(
-        `bKash token grant failed: ${tokenJson.statusMessage || tokenRes.status}`,
-        502,
-      );
+      throw new VerificationError(`bKash token grant failed: ${tokenJson.statusMessage || tokenRes.status}`, 502);
     }
 
     const searchRes = await fetch(`${env.providers.bkashBaseUrl}/tokenized/checkout/general/searchTransaction`, {
@@ -243,34 +258,30 @@ export async function verifyPaymentViaProviderApi(params: {
       trxID?: string;
       transactionStatus?: string;
       amount?: string;
-      currency?: string;
       statusMessage?: string;
     };
 
     if (!searchRes.ok || searchJson.transactionStatus !== 'Completed') {
       throw new VerificationError(
-        `bKash verification failed or not Completed: ${searchJson.statusMessage || searchJson.transactionStatus || searchRes.status}`,
+        `bKash verification failed: ${searchJson.statusMessage || searchJson.transactionStatus || searchRes.status}`,
         422,
       );
     }
     const apiAmt = Number.parseFloat(searchJson.amount || '0');
     if (Math.abs(apiAmt - Number(payment.amount_bdt)) > 0.01) {
-      throw new VerificationError(
-        `bKash API amount (${apiAmt}) does not match expected amount (${payment.amount_bdt}).`,
-        422,
-      );
+      throw new VerificationError(`bKash API amount (${apiAmt}) mismatch.`, 422);
     }
     providerPayload = searchJson as Record<string, unknown>;
     documentaryRef = `BKASH-API-TRX-${trxId}`;
   } else if (payment.provider === 'NAGAD') {
     if (!env.providers.nagadMerchantId || !env.providers.nagadMerchantPrivateKey) {
       throw new VerificationError(
-        'Official Nagad Merchant API credentials are not configured in environment variables. Configure NAGAD_MERCHANT_ID/PRIVATE_KEY or use Documented Manual Finance Verification.',
+        'Official Nagad Merchant API credentials are not configured in .env. Configure them or perform Documented Manual Finance Verification.',
         422,
       );
     }
     const verifyRes = await fetch(`${env.providers.nagadBaseUrl}/verify/payment/${encodeURIComponent(trxId)}`);
-    const verifyJson = (await verifyRes.json()) as { status?: string; amount?: string; issuerPaymentRefNo?: string };
+    const verifyJson = (await verifyRes.json()) as { status?: string; amount?: string };
     if (!verifyRes.ok || verifyJson.status !== 'Success') {
       throw new VerificationError(`Nagad verification failed: ${verifyJson.status || verifyRes.status}`, 422);
     }
@@ -280,10 +291,10 @@ export async function verifyPaymentViaProviderApi(params: {
     }
     providerPayload = verifyJson as Record<string, unknown>;
     documentaryRef = `NAGAD-API-TRX-${trxId}`;
-  } else {
+  } else if (payment.provider === 'ROCKET') {
     if (!env.providers.rocketBaseUrl || !env.providers.rocketMerchantId || !env.providers.rocketApiSecret) {
       throw new VerificationError(
-        'Official DBBL Rocket Merchant Inquiry API credentials are not configured in environment variables. Configure ROCKET_API_BASE_URL/MERCHANT_ID/API_SECRET or use Documented Manual Finance Verification.',
+        'Official DBBL Rocket Merchant API credentials are not configured in .env. Configure them or perform Documented Manual Finance Verification.',
         422,
       );
     }
@@ -293,12 +304,17 @@ export async function verifyPaymentViaProviderApi(params: {
         Authorization: `Bearer ${env.providers.rocketApiSecret}`,
       },
     });
-    const verifyJson = (await verifyRes.json()) as { status?: string; amount?: string };
+    const verifyJson = (await verifyRes.json()) as { status?: string };
     if (!verifyRes.ok || verifyJson.status !== 'SUCCESS') {
       throw new VerificationError(`Rocket verification failed: ${verifyJson.status || verifyRes.status}`, 422);
     }
     providerPayload = verifyJson as Record<string, unknown>;
     documentaryRef = `ROCKET-API-TRX-${trxId}`;
+  } else {
+    throw new VerificationError(
+      `${payment.provider} requires Documented Manual Finance Verification (bank/merchant portal reference) as official real-time merchant query API is not available.`,
+      422,
+    );
   }
 
   const verificationId = newId();
@@ -326,8 +342,10 @@ export async function verifyPaymentViaProviderApi(params: {
     );
 
     await tx.execute(
-      'UPDATE payment_intents SET status = \'VERIFIED_SETTLED\', updated_at = ? WHERE id = ?',
-      [now, payment.id],
+      `UPDATE payment_intents
+       SET status = 'SUCCESS', verified_at = ?, settled_at = ?, updated_at = ?
+       WHERE id = ?`,
+      [now, now, now, payment.id],
     );
 
     if (payment.wallet_id) {
@@ -336,18 +354,30 @@ export async function verifyPaymentViaProviderApi(params: {
         [payment.amount_bdt, payment.wallet_id],
       );
     }
+    await tx.execute(
+      'UPDATE merchants SET settled_balance_bdt = settled_balance_bdt + ? WHERE id = ?',
+      [payment.amount_bdt, payment.merchant_id],
+    );
+  });
+
+  emitPaymentUpdated({
+    paymentId: payment.id,
+    merchantId: payment.merchant_id,
+    status: 'SUCCESS',
+    provider: payment.provider,
+    amountBdt: Number(payment.amount_bdt),
   });
 
   await recordAuditLog({
     actorType: 'USER',
     actorId: params.actorId,
     actorEmail: params.actorEmail,
-    action: 'PAYMENT_PROVIDER_API_VERIFIED_SETTLED',
+    action: 'PAYMENT_PROVIDER_API_VERIFIED_SUCCESS',
     resourceType: 'payment_intent',
     resourceId: payment.id,
     ipAddress: params.ipAddress ?? null,
     beforeState: { status: payment.status },
-    afterState: { status: 'VERIFIED_SETTLED', verificationId, documentaryRef, trxId },
+    afterState: { status: 'SUCCESS', verificationId, documentaryRef, trxId },
   });
 
   await dispatchMerchantWebhook({
@@ -357,7 +387,7 @@ export async function verifyPaymentViaProviderApi(params: {
     payload: {
       paymentId: payment.id,
       merchantOrderId: payment.merchant_order_id,
-      status: 'VERIFIED_SETTLED',
+      status: 'SUCCESS',
       provider: payment.provider,
       amountBdt: payment.amount_bdt,
       trxId,
@@ -367,5 +397,5 @@ export async function verifyPaymentViaProviderApi(params: {
     },
   });
 
-  return { paymentId: payment.id, status: 'VERIFIED_SETTLED', verificationId };
+  return { paymentId: payment.id, status: 'SUCCESS', verificationId };
 }

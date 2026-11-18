@@ -1,4 +1,13 @@
-export type ProviderCode = 'BKASH' | 'NAGAD' | 'ROCKET';
+export type ProviderCode =
+  | 'BKASH'
+  | 'NAGAD'
+  | 'ROCKET'
+  | 'UPAY'
+  | 'CELLFIN'
+  | 'BANGLA_QR'
+  | 'BANK_SMS';
+
+export type AccountMode = 'PERSONAL' | 'MERCHANT' | 'BANK_ACCOUNT';
 
 export type ParseStatus = 'PARSED' | 'UNPARSED' | 'DUPLICATE' | 'IGNORED_SECURITY';
 
@@ -7,18 +16,22 @@ export interface RawNotificationInput {
   title?: string | null;
   body: string;
   senderHeader?: string | null;
+  sourceChannel?: 'NOTIFICATION' | 'SMS';
+  simSlot?: number | null;
   deviceTimestampMs?: number;
 }
 
 export interface ParsedMfsNotification {
   provider: ProviderCode | 'UNKNOWN';
   parseStatus: 'PARSED' | 'UNPARSED' | 'IGNORED_SECURITY';
+  accountMode: AccountMode | null;
   txType: string | null;
   amountBdt: number | null;
   trxId: string | null;
   senderPhone: string | null;
-  receiverPhone: string | null;
+  receiverAccount: string | null;
   balanceBdt: number | null;
+  bankName: string | null;
   reference: string | null;
   confidence: number;
   redactedBody: string;
@@ -43,7 +56,6 @@ export function containsSensitiveOtpOrPin(text: string): boolean {
 }
 
 export function sanitizeSensitiveContent(text: string): string {
-  // Strip any accidental OTP/PIN digits while keeping transaction IDs intact
   return text
     .replace(/\b(OTP|PIN|Code)\s*[:=-]?\s*\d{4,8}\b/gi, '$1: [REDACTED]')
     .trim();
@@ -53,7 +65,7 @@ export function normalizeBdPhone(raw?: string | null): string | null {
   if (!raw) return null;
   const digits = raw.replace(/[^\d]/g, '');
   if (digits.startsWith('8801') && digits.length >= 13) {
-    return digits.slice(2, 14); // 01XXXXXXXXX or 12-digit Rocket A/C
+    return digits.slice(2, 14);
   }
   if (digits.startsWith('01') && (digits.length === 11 || digits.length === 12)) {
     return digits;

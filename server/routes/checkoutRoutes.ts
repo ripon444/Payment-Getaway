@@ -2,7 +2,9 @@ import { Router } from 'express';
 import QRCode from 'qrcode';
 import { getDb, isoNow } from '../db/client.ts';
 import { normalizeBdPhone } from '../parsers/types.ts';
+import { emitPaymentUpdated } from '../realtime/socket.ts';
 import { recordAuditLog } from '../services/auditService.ts';
+import { buildBanglaQrString } from '../utils/banglaQr.ts';
 
 export const checkoutRoutes = Router();
 
@@ -17,6 +19,7 @@ checkoutRoutes.get('/:id', async (req, res) => {
     amount_bdt: number;
     currency: string;
     reference_code: string;
+    bangla_qr_string: string | null;
     submitted_trx_id: string | null;
     submitted_sender_phone: string | null;
     status: string;
@@ -27,7 +30,7 @@ checkoutRoutes.get('/:id', async (req, res) => {
     wallet_title: string | null;
   }>(
     `SELECT p.id, p.merchant_id, m.name AS merchant_name, p.merchant_order_id, p.provider,
-            p.amount_bdt, p.currency, p.reference_code, p.submitted_trx_id,
+            p.amount_bdt, p.currency, p.reference_code, p.bangla_qr_string, p.submitted_trx_id,
             p.submitted_sender_phone, p.status, p.expires_at,
             w.id AS wallet_id, w.account_number AS wallet_number, w.account_type AS wallet_type, w.account_title AS wallet_title
      FROM payment_intents p
@@ -48,8 +51,10 @@ checkoutRoutes.get('/:id', async (req, res) => {
     account_number: string;
     account_type: string;
     account_title: string;
+    bank_name: string | null;
+    bangla_qr_payload: string | null;
   }>(
-    'SELECT id, provider, account_number, account_type, account_title FROM mfs_wallets WHERE merchant_id = ? AND is_active = 1',
+    'SELECT id, provider, account_number, account_type, account_title, bank_name, bangla_qr_payload FROM mfs_wallets WHERE merchant_id = ? AND is_active = 1',
     [payment.merchant_id],
   );
 
@@ -58,11 +63,25 @@ checkoutRoutes.get('/:id', async (req, res) => {
     availableWallets.find((w) => w.provider === payment.provider) ||
     null;
 
-  const qrContent = activeWallet
-    ? `${payment.provider}:${activeWallet.account_number}?amount=${payment.amount_bdt}&ref=${payment.reference_code}`
-    : `${payment.provider}:${payment.reference_code}:${payment.amount_bdt}`;
+  const banglaQrWallet = availableWallets.find((w) => w.provider === 'BANGLA_QR');
+  const banglaQrString =
+    payment.bangla_qr_string ||
+    buildBanglaQrString({
+      merchantName: payment.merchant_name,
+      accountNumber: banglaQrWallet?.account_number || activeWallet?.account_number || '01700000000',
+      amountBdt: Number(payment.amount_bdt),
+      referenceCode: payment.reference_code,
+    });
 
-  const qrDataUrl = await QRCode.toDataURL(qrContent, { margin: 1, width: 200 });
+  const qrContent =
+    payment.provider === 'BANGLA_QR'
+      ? banglaQrString
+      : activeWallet
+        ? `${payment.provider}:${activeWallet.account_number}?amount=${payment.amount_bdt}&ref=${payment.reference_code}`
+        : banglaQrString;
+
+  const qrDataUrl = await QRCode.toDataURL(qrContent, { margin: 1, width: 220 });
+  const banglaQrDataUrl = await QRCode.toDataURL(banglaQrString, { margin: 1, width: 220 });
 
   res.json({
     checkout: {
@@ -80,6 +99,8 @@ checkoutRoutes.get('/:id', async (req, res) => {
       receiverWallet: activeWallet,
       availableWallets,
       qrDataUrl,
+      banglaQrString,
+      banglaQrDataUrl,
     },
   });
 });
@@ -100,7 +121,7 @@ checkoutRoutes.post('/:id/submit', async (req, res) => {
     res.status(404).json({ error: 'Checkout session not found' });
     return;
   }
-  if (payment.status === 'VERIFIED_SETTLED' || payment.status === 'REJECTED') {
+  if (payment.status === 'SUCCESS' || payment.status === 'FAILED' || payment.status === 'EXPIRED') {
     res.status(409).json({ error: `Payment is already ${payment.status}` });
     return;
   }
@@ -112,7 +133,7 @@ checkoutRoutes.post('/:id/submit', async (req, res) => {
   const senderPhone = normalizeBdPhone(String(req.body?.senderPhone ?? '').trim());
 
   if (!trxId || trxId.length < 6) {
-    res.status(400).json({ error: 'Valid MFS Transaction ID (TrxID, min 6 characters) is required' });
+    res.status(400).json({ error: 'Valid Transaction / Reference ID (min 6 characters) is required' });
     return;
   }
   if (!senderPhone) {
@@ -123,17 +144,17 @@ checkoutRoutes.post('/:id/submit', async (req, res) => {
   // Prevent reusing an already verified TrxID
   const usedTrx = await db.queryOne<{ id: string }>(
     `SELECT id FROM provider_verifications
-     WHERE provider = ? AND provider_trx_id = ? AND decision = 'VERIFIED' LIMIT 1`,
-    [requestedProvider, trxId],
+     WHERE provider_trx_id = ? AND decision = 'VERIFIED' LIMIT 1`,
+    [trxId],
   );
   if (usedTrx) {
-    res.status(409).json({ error: 'This TrxID has already been used for a verified settlement.' });
+    res.status(409).json({ error: 'This Transaction ID has already been used for a verified settlement.' });
     return;
   }
 
-  // Update wallet if customer switched provider on checkout
   let walletIdClause = '';
-  const params: (string | number | null)[] = [requestedProvider, trxId, senderPhone, isoNow(), isoNow()];
+  const now = isoNow();
+  const params: (string | number | null)[] = [requestedProvider, trxId, senderPhone, now, now, now];
 
   if (requestedProvider !== payment.provider) {
     const newWallet = await db.queryOne<{ id: string }>(
@@ -150,28 +171,26 @@ checkoutRoutes.post('/:id/submit', async (req, res) => {
   const preArrivedNotif = await db.queryOne<{
     id: string;
     parsed_amount_bdt: number | null;
-    parsed_sender_phone: string | null;
   }>(
-    `SELECT id, parsed_amount_bdt, parsed_sender_phone
+    `SELECT id, parsed_amount_bdt
      FROM notification_events
-     WHERE provider = ? AND parsed_trx_id = ? AND parse_status = 'PARSED'
+     WHERE parsed_trx_id = ? AND parse_status = 'PARSED'
      LIMIT 1`,
-    [requestedProvider, trxId],
+    [trxId],
   );
 
-  let nextStatus = 'CUSTOMER_SUBMITTED';
+  let nextStatus = 'DETECTED';
   let confidence: number | null = null;
   let matchedNotifId: string | null = null;
 
   if (preArrivedNotif && preArrivedNotif.parsed_amount_bdt !== null) {
     const diff = Math.abs(Number(preArrivedNotif.parsed_amount_bdt) - Number(payment.amount_bdt));
     if (diff < 0.01) {
-      // Elevated ONLY to CANDIDATE_MATCHED — never VERIFIED_SETTLED!
-      nextStatus = 'CANDIDATE_MATCHED';
+      nextStatus = 'MATCHED';
       confidence = 90;
       matchedNotifId = preArrivedNotif.id;
     } else {
-      nextStatus = 'MANUAL_REVIEW_REQUIRED';
+      nextStatus = 'REVIEW_REQUIRED';
       confidence = 50;
       matchedNotifId = preArrivedNotif.id;
     }
@@ -182,12 +201,21 @@ checkoutRoutes.post('/:id/submit', async (req, res) => {
   await db.execute(
     `UPDATE payment_intents
      SET provider = ?, submitted_trx_id = ?, submitted_sender_phone = ?,
-         submitted_at = ?, updated_at = ? ${walletIdClause},
+         submitted_at = ?, detected_at = COALESCE(detected_at, ?), updated_at = ? ${walletIdClause},
          status = ?, match_confidence = COALESCE(?, match_confidence),
          matched_notification_id = COALESCE(?, matched_notification_id)
      WHERE id = ?`,
     params,
   );
+
+  emitPaymentUpdated({
+    paymentId: payment.id,
+    merchantId: payment.merchant_id,
+    status: nextStatus,
+    provider: requestedProvider,
+    amountBdt: Number(payment.amount_bdt),
+    matchConfidence: confidence,
+  });
 
   await recordAuditLog({
     actorType: 'SYSTEM',
@@ -204,8 +232,8 @@ checkoutRoutes.post('/:id/submit', async (req, res) => {
     status: nextStatus,
     submittedTrxId: trxId,
     message:
-      nextStatus === 'CANDIDATE_MATCHED'
-        ? 'Transaction reference matched against incoming alert. Awaiting authorized verification.'
-        : 'Transaction reference submitted. Awaiting notification match and verification.',
+      nextStatus === 'MATCHED'
+        ? 'Transaction ID matched incoming payment alert (MATCHED). Awaiting authoritative verification before SUCCESS.'
+        : 'Transaction ID received (DETECTED). Awaiting notification match and verification.',
   });
 });

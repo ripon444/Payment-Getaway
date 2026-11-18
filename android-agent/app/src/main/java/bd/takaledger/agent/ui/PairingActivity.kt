@@ -1,14 +1,22 @@
 package bd.takaledger.agent.ui
 
+import android.Manifest
 import android.content.ComponentName
 import android.content.Intent
+import android.content.pm.PackageManager
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.PowerManager
 import android.provider.Settings
 import android.widget.Button
 import android.widget.EditText
+import android.widget.LinearLayout
+import android.widget.ScrollView
 import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.app.ActivityCompat
+import androidx.core.content.ContextCompat
 import androidx.work.ExistingPeriodicWorkPolicy
 import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
@@ -38,15 +46,24 @@ class PairingActivity : AppCompatActivity() {
         val store = DeviceCryptoStore(this)
         val statusView = TextView(this).apply {
             text = if (store.isPaired()) {
-                "Device Paired (${store.getDeviceId()})\nGateway: ${store.getGatewayUrl()}"
+                "Status: PAIRED (${store.getDeviceId()})\nGateway: ${store.getGatewayUrl()}"
             } else {
-                "Not Paired — Enter Gateway URL and Pairing Code from Admin Dashboard"
+                "Status: NOT PAIRED — Enter Gateway URL & Pairing Code from Admin/Merchant Dashboard"
             }
-            setPadding(48, 48, 48, 24)
+            setPadding(0, 0, 0, 24)
+        }
+
+        val rationaleView = TextView(this).apply {
+            text = "Permissions & Security Notice:\n" +
+                "• Notification Listener reads incoming payment alerts from bKash, Nagad, Rocket, Upay, CellFin, and Bank apps.\n" +
+                "• SMS Access (Optional) captures bank credit & Bangla QR SMS on dual-SIM phones.\n" +
+                "• OTP, PIN, and password messages are redacted locally and never uploaded.\n" +
+                "• Battery Optimization must be disabled for reliable offline-to-online background sync."
+            setPadding(0, 16, 0, 24)
         }
 
         val urlInput = EditText(this).apply {
-            hint = "https://gateway.yourdomain.com"
+            hint = "https://pay.yourdomain.com"
             setText(store.getGatewayUrl() ?: "")
         }
         val codeInput = EditText(this).apply {
@@ -64,26 +81,57 @@ class PairingActivity : AppCompatActivity() {
             }
         }
 
-        val permBtn = Button(this).apply {
-            text = "Enable Notification Listener Access"
+        val notifPermBtn = Button(this).apply {
+            text = "1. Grant Notification Listener Access"
             setOnClickListener {
                 startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS))
             }
         }
 
-        val layout = android.widget.LinearLayout(this).apply {
-            orientation = android.widget.LinearLayout.VERTICAL
+        val smsPermBtn = Button(this).apply {
+            text = "2. Grant SMS Read Access (Bank / Bangla QR SMS)"
+            setOnClickListener {
+                if (ContextCompat.checkSelfPermission(this@PairingActivity, Manifest.permission.RECEIVE_SMS)
+                    != PackageManager.PERMISSION_GRANTED
+                ) {
+                    ActivityCompat.requestPermissions(
+                        this@PairingActivity,
+                        arrayOf(Manifest.permission.RECEIVE_SMS, Manifest.permission.READ_PHONE_STATE),
+                        101
+                    )
+                }
+            }
+        }
+
+        val batteryBtn = Button(this).apply {
+            text = "3. Disable Battery Optimization (Recommended)"
+            setOnClickListener {
+                val pm = getSystemService(POWER_SERVICE) as PowerManager
+                if (!pm.isIgnoringBatteryOptimizations(packageName)) {
+                    val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
+                        data = Uri.parse("package:$packageName")
+                    }
+                    startActivity(intent)
+                }
+            }
+        }
+
+        val layout = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
             setPadding(48, 64, 48, 48)
             addView(statusView)
             addView(urlInput)
             addView(codeInput)
             addView(pairBtn)
-            addView(permBtn)
+            addView(rationaleView)
+            addView(notifPermBtn)
+            addView(smsPermBtn)
+            addView(batteryBtn)
         }
 
-        setContentView(layout)
+        setContentView(ScrollView(this).apply { addView(layout) })
         schedulePeriodicSync()
-        refreshQueueCount(statusView, store)
+        refreshDiagnostics(statusView, store)
     }
 
     private fun performPairing(
@@ -100,7 +148,7 @@ class PairingActivity : AppCompatActivity() {
                     put("deviceUid", "AND-${androidId.take(10).uppercase()}")
                     put("androidModel", "${Build.MANUFACTURER} ${Build.MODEL}")
                     put("androidVersion", "Android ${Build.VERSION.RELEASE}")
-                    put("appVersion", "1.4.2")
+                    put("appVersion", "2.0.0")
                 }.toString()
 
                 val req = Request.Builder()
@@ -132,16 +180,24 @@ class PairingActivity : AppCompatActivity() {
         }
     }
 
-    private fun refreshQueueCount(statusView: TextView, store: DeviceCryptoStore) {
+    private fun refreshDiagnostics(statusView: TextView, store: DeviceCryptoStore) {
         scope.launch {
             val count = withContext(Dispatchers.IO) {
                 OfflineQueueDatabase.getInstance(applicationContext).dao().getPendingCount()
             }
             val listenerEnabled = isListenerEnabled()
-            statusView.append("\nListener Active: $listenerEnabled | Queued Offline Events: $count")
-            if (store.isPaired()) {
-                statusView.append("\nSecurity: Keystore AES-256-GCM + HMAC-SHA256 Active")
-            }
+            val smsGranted = ContextCompat.checkSelfPermission(
+                this@PairingActivity,
+                Manifest.permission.RECEIVE_SMS
+            ) == PackageManager.PERMISSION_GRANTED
+            val pm = getSystemService(POWER_SERVICE) as PowerManager
+            val batteryExempt = pm.isIgnoringBatteryOptimizations(packageName)
+
+            statusView.append(
+                "\nListener Active: $listenerEnabled | SMS Granted: $smsGranted" +
+                    "\nBattery Unrestricted: $batteryExempt | Queued Offline Events: $count" +
+                    if (store.isPaired()) "\nCrypto: Android Keystore AES-256-GCM + HMAC-SHA256" else ""
+            )
         }
     }
 

@@ -12,7 +12,7 @@ export class BkashParser implements MfsProviderParser {
       this.knownPackages.some((p) => p.toLowerCase() === pkg) ||
       combined.includes('bkash') ||
       combined.includes('16247') ||
-      /\btrxid\s+[a-z0-9]{8,12}\b/i.test(input.body)
+      (/\btrxid\s+[a-z0-9]{8,12}\b/i.test(input.body) && !combined.includes('upay') && !combined.includes('cellfin'))
     );
   }
 
@@ -23,12 +23,14 @@ export class BkashParser implements MfsProviderParser {
       return {
         provider: 'BKASH',
         parseStatus: 'IGNORED_SECURITY',
+        accountMode: null,
         txType: null,
         amountBdt: null,
         trxId: null,
         senderPhone: null,
-        receiverPhone: null,
+        receiverAccount: null,
         balanceBdt: null,
+        bankName: 'bKash',
         reference: null,
         confidence: 0,
         redactedBody: '[REDACTED_OTP_OR_PIN_NOTIFICATION]',
@@ -39,26 +41,38 @@ export class BkashParser implements MfsProviderParser {
 
     const body = sanitizeSensitiveContent(input.body);
     const warnings: string[] = [];
+    const pkg = input.packageName.toLowerCase();
 
-    // Detect incoming credit transaction type
     let txType: string | null = null;
-    if (/received\s+payment/i.test(body)) txType = 'PAYMENT';
-    else if (/cash\s*in\s+tk/i.test(body) || /received\s+cash\s*in/i.test(body)) txType = 'CASH_IN';
-    else if (/you\s+have\s+received\s+tk/i.test(body)) txType = 'SEND_MONEY';
-    else if (/পেয়েছেন|টাকা\s+পাঠানো\s+হয়েছে/i.test(body)) txType = 'INCOMING_BN';
+    let accountMode: 'PERSONAL' | 'MERCHANT' =
+      pkg.includes('merchant') || pkg.includes('business') || /received\s+payment/i.test(body)
+        ? 'MERCHANT'
+        : 'PERSONAL';
 
-    // Reject outgoing debit notifications from candidate matching
+    if (/received\s+payment/i.test(body)) {
+      txType = 'PAYMENT';
+      accountMode = 'MERCHANT';
+    } else if (/cash\s*in\s+tk/i.test(body) || /received\s+cash\s*in/i.test(body)) {
+      txType = 'CASH_IN';
+    } else if (/you\s+have\s+received\s+tk/i.test(body)) {
+      txType = 'SEND_MONEY';
+    } else if (/পেয়েছেন/i.test(body)) {
+      txType = 'INCOMING_BN';
+    }
+
     if (/\b(you\s+have\s+sent|cash\s*out|payment\s+of\s+tk\s+[\d,.]+\s+to)\b/i.test(body)) {
-      warnings.push('Outgoing debit notification detected; ignored for incoming payment matching');
+      warnings.push('Outgoing debit notification detected; ignored for incoming matching');
       return {
         provider: 'BKASH',
         parseStatus: 'UNPARSED',
+        accountMode,
         txType: 'OUTGOING_DEBIT',
         amountBdt: null,
         trxId: null,
         senderPhone: null,
-        receiverPhone: null,
+        receiverAccount: null,
         balanceBdt: null,
+        bankName: 'bKash',
         reference: null,
         confidence: 15,
         redactedBody: body,
@@ -91,17 +105,17 @@ export class BkashParser implements MfsProviderParser {
     if (!amountBdt) warnings.push('Missing bKash BDT amount');
     if (!trxId) warnings.push('Missing bKash TrxID');
 
-    const parseStatus = amountBdt !== null && trxId !== null ? 'PARSED' : 'UNPARSED';
-
     return {
       provider: 'BKASH',
-      parseStatus,
+      parseStatus: amountBdt !== null && trxId !== null ? 'PARSED' : 'UNPARSED',
+      accountMode,
       txType: txType ?? 'INCOMING',
       amountBdt,
       trxId,
       senderPhone,
-      receiverPhone: null,
+      receiverAccount: null,
       balanceBdt,
+      bankName: 'bKash',
       reference,
       confidence,
       redactedBody: body,

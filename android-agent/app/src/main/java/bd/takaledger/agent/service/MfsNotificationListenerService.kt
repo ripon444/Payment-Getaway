@@ -21,8 +21,8 @@ import java.util.UUID
 import java.util.concurrent.TimeUnit
 
 /**
- * Read-only NotificationListenerService for bKash, Nagad, and DBBL Rocket transaction alerts.
- * Strictly blocks OTP/PIN notifications before queuing and never interacts with or automates MFS UI.
+ * Read-only NotificationListenerService for bKash, Nagad, Rocket, Upay, CellFin, Bangla QR, and Bank alerts.
+ * Strictly blocks OTP/PIN notifications locally before queuing and never automates MFS or Banking UI.
  */
 class MfsNotificationListenerService : NotificationListenerService() {
 
@@ -41,19 +41,18 @@ class MfsNotificationListenerService : NotificationListenerService() {
 
         if (rawBody.isBlank()) return
 
-        // For SMS/messaging apps, only process messages explicitly referencing bKash, Nagad, or Rocket
-        if (SMS_PACKAGES.contains(pkg) && !containsMfsKeyword("$title $rawBody")) {
+        if (SMS_PACKAGES.contains(pkg) && !containsPaymentKeyword("$title $rawBody")) {
             return
         }
 
-        // Security Guard: Never persist or forward OTP / PIN / verification code messages
+        // Security Guard: Never persist or upload OTP / PIN / verification code messages
         if (OTP_OR_PIN_REGEX.containsMatchIn("$title $rawBody")) {
             return
         }
 
         val redactedBody = sanitizeBody(rawBody)
         val ts = sbn.postTime
-        val eventHash = DeviceCryptoStore.sha256Hex("$pkg|${title.orEmpty()}|$redactedBody|${ts / 1000}")
+        val eventHash = DeviceCryptoStore.sha256Hex("NOTIF|$pkg|${title.orEmpty()}|$redactedBody|${ts / 1000}")
         val entity = QueuedNotificationEntity(
             eventUid = UUID.randomUUID().toString(),
             eventHash = eventHash,
@@ -89,14 +88,23 @@ class MfsNotificationListenerService : NotificationListenerService() {
     companion object {
         private const val SYNC_WORK_NAME = "takaledger_event_sync"
 
-        private val MFS_APP_PACKAGES = setOf(
+        private val MFS_AND_BANK_PACKAGES = setOf(
             "com.bKash.customerapp",
             "com.bkash.businessapp",
             "com.bkash.merchant",
             "com.konasl.nagad",
             "com.konasl.nagad.uddokta",
             "com.dbbl.mfs.rocket",
-            "com.dbbl.rocket"
+            "com.dbbl.rocket",
+            "com.ucb.upay",
+            "bd.com.upay.agent",
+            "bd.com.upay.merchant",
+            "com.ibbl.cellfin",
+            "com.islamibank.cellfin",
+            "com.citybank.citytouch",
+            "com.bracbank.astha",
+            "com.dbbl.nexus.pay",
+            "com.ebl.skybanking"
         )
 
         private val SMS_PACKAGES = setOf(
@@ -105,24 +113,30 @@ class MfsNotificationListenerService : NotificationListenerService() {
             "com.android.mms"
         )
 
-        private val WHITELISTED_PACKAGES = MFS_APP_PACKAGES + SMS_PACKAGES
+        private val WHITELISTED_PACKAGES = MFS_AND_BANK_PACKAGES + SMS_PACKAGES
 
-        private val OTP_OR_PIN_REGEX = Regex(
+        val OTP_OR_PIN_REGEX = Regex(
             """\b(otp|one[\s-]*time[\s-]*password|verification\s*code|pin\s*(?:is|:)|secret\s*code)\b""",
             RegexOption.IGNORE_CASE
         )
 
-        private fun containsMfsKeyword(content: String): Boolean {
+        fun containsPaymentKeyword(content: String): Boolean {
             val lower = content.lowercase()
             return lower.contains("bkash") ||
                 lower.contains("nagad") ||
                 lower.contains("rocket") ||
+                lower.contains("upay") ||
+                lower.contains("cellfin") ||
+                lower.contains("banglaqr") ||
+                lower.contains("bangla qr") ||
+                lower.contains("credited") ||
                 lower.contains("16247") ||
                 lower.contains("16167") ||
-                lower.contains("16216")
+                lower.contains("16216") ||
+                lower.contains("16268")
         }
 
-        private fun sanitizeBody(body: String): String {
+        fun sanitizeBody(body: String): String {
             return body.replace(
                 Regex("""\b(OTP|PIN|Code)\s*[:=-]?\s*\d{4,8}\b""", RegexOption.IGNORE_CASE),
                 "$1: [REDACTED]"

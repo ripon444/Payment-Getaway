@@ -1,12 +1,15 @@
 import fs from 'node:fs';
+import http from 'node:http';
 import path from 'node:path';
 import cors from 'cors';
 import express from 'express';
+import rateLimit from 'express-rate-limit';
 import helmet from 'helmet';
 import { createServer as createViteServer } from 'vite';
 import { env } from './server/config/env.ts';
 import { ensureSeedData, getDb } from './server/db/client.ts';
 import type { AuthedRequest } from './server/middleware/auth.ts';
+import { initSocketServer } from './server/realtime/socket.ts';
 import { authRoutes } from './server/routes/authRoutes.ts';
 import { checkoutRoutes } from './server/routes/checkoutRoutes.ts';
 import { deviceRoutes } from './server/routes/deviceRoutes.ts';
@@ -39,13 +42,31 @@ async function bootstrap() {
     }),
   );
 
+  // Rate limiting for sensitive endpoints
+  const authLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000,
+    max: 60,
+    standardHeaders: true,
+    legacyHeaders: false,
+  });
+  const apiLimiter = rateLimit({
+    windowMs: 60 * 1000,
+    max: 180,
+    standardHeaders: true,
+    legacyHeaders: false,
+  });
+
+  app.use('/api/auth/login', authLimiter);
+  app.use('/api/v1', apiLimiter);
+  app.use('/api/checkout', apiLimiter);
+
   // Health & DB dialect endpoint
   app.get('/api/health', (_req, res) => {
     const db = getDb();
-    res.json({ ok: true, dialect: db.dialect, env: env.nodeEnv });
+    res.json({ ok: true, dialect: db.dialect, env: env.nodeEnv, socketIo: true });
   });
 
-  // Demo Merchant Webhook Receiver (allows end-to-end signed webhook delivery testing in preview)
+  // Demo Merchant Webhook Receiver
   app.post('/api/demo-merchant-webhook', (req, res) => {
     res.status(200).json({
       received: true,
@@ -85,8 +106,11 @@ async function bootstrap() {
     app.use(vite.middlewares);
   }
 
-  app.listen(env.port, '0.0.0.0', () => {
-    console.info(`[TakaLedger Gateway] Listening on http://0.0.0.0:${env.port} (${getDb().dialect})`);
+  const httpServer = http.createServer(app);
+  initSocketServer(httpServer);
+
+  httpServer.listen(env.port, '0.0.0.0', () => {
+    console.info(`[TakaLedger Gateway] Listening on http://0.0.0.0:${env.port} (${getDb().dialect} + Socket.IO)`);
   });
 }
 

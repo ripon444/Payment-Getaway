@@ -7,18 +7,24 @@ import { encryptSecret, generateApiKey, generateSecretHex, newId } from '../util
 
 export const merchantRoutes = Router();
 
+const VALID_PROVIDERS = ['BKASH', 'NAGAD', 'ROCKET', 'UPAY', 'CELLFIN', 'BANGLA_QR', 'BANK_SMS'];
+
 merchantRoutes.get('/', requireAuth, async (req: AuthedRequest, res) => {
   const db = getDb();
   const isScoped = req.user!.role === 'MERCHANT_ADMIN' && req.user!.merchantId;
+  const scopedParams = isScoped ? [req.user!.merchantId!] : [];
+
   const merchants = await db.query(
     `SELECT m.id, m.name, m.slug, m.business_type, m.contact_email, m.webhook_url,
-            m.api_key_prefix, m.settlement_mode, m.status, m.created_at,
+            m.api_key_prefix, m.settlement_mode, m.fee_percent, m.settled_balance_bdt,
+            m.pending_balance_bdt, m.status, m.created_at,
             (SELECT COUNT(*) FROM mfs_wallets w WHERE w.merchant_id = m.id AND w.is_active = 1) AS active_wallets,
+            (SELECT COUNT(*) FROM merchant_websites s WHERE s.merchant_id = m.id AND s.is_active = 1) AS active_websites,
             (SELECT COUNT(*) FROM payment_intents p WHERE p.merchant_id = m.id) AS total_payments
      FROM merchants m
      ${isScoped ? 'WHERE m.id = ?' : ''}
      ORDER BY m.created_at DESC`,
-    isScoped ? [req.user!.merchantId!] : [],
+    scopedParams,
   );
 
   const wallets = await db.query(
@@ -27,10 +33,19 @@ merchantRoutes.get('/', requireAuth, async (req: AuthedRequest, res) => {
      JOIN merchants m ON m.id = w.merchant_id
      ${isScoped ? 'WHERE w.merchant_id = ?' : ''}
      ORDER BY w.provider, w.created_at DESC`,
-    isScoped ? [req.user!.merchantId!] : [],
+    scopedParams,
   );
 
-  res.json({ merchants, wallets });
+  const websites = await db.query(
+    `SELECT s.*, m.name AS merchant_name
+     FROM merchant_websites s
+     JOIN merchants m ON m.id = s.merchant_id
+     ${isScoped ? 'WHERE s.merchant_id = ?' : ''}
+     ORDER BY s.created_at DESC`,
+    scopedParams,
+  );
+
+  res.json({ merchants, wallets, websites });
 });
 
 merchantRoutes.post('/', requireAuth, requireRole('SUPER_ADMIN'), async (req: AuthedRequest, res) => {
@@ -92,14 +107,15 @@ merchantRoutes.post('/', requireAuth, requireRole('SUPER_ADMIN'), async (req: Au
 
   res.status(201).json({
     merchant: { id, name, slug, contactEmail, webhookUrl, apiKeyPrefix: apiKey.prefix, status: 'ACTIVE' },
-    credentialsOnce: {
-      apiKey: apiKey.rawKey,
-      webhookSecret,
-    },
+    credentialsOnce: { apiKey: apiKey.rawKey, webhookSecret },
   });
 });
 
-merchantRoutes.post('/:id/rotate-key', requireAuth, requireRole('SUPER_ADMIN'), async (req: AuthedRequest, res) => {
+merchantRoutes.post('/:id/rotate-key', requireAuth, requireRole('SUPER_ADMIN', 'MERCHANT_ADMIN'), async (req: AuthedRequest, res) => {
+  if (req.user!.role === 'MERCHANT_ADMIN' && req.user!.merchantId !== req.params.id) {
+    res.status(403).json({ error: 'Forbidden' });
+    return;
+  }
   const db = getDb();
   const merchant = await db.queryOne<{ id: string; name: string }>('SELECT id, name FROM merchants WHERE id = ?', [
     req.params.id,
@@ -172,16 +188,20 @@ merchantRoutes.post('/:id/rotate-webhook-secret', requireAuth, requireRole('SUPE
   res.json({ webhookSecret });
 });
 
-merchantRoutes.post('/wallets', requireAuth, requireRole('SUPER_ADMIN', 'OPERATIONS'), async (req: AuthedRequest, res) => {
-  const merchantId = String(req.body?.merchantId ?? '');
+merchantRoutes.post('/wallets', requireAuth, requireRole('SUPER_ADMIN', 'OPERATIONS', 'MERCHANT_ADMIN'), async (req: AuthedRequest, res) => {
+  const merchantId =
+    req.user!.role === 'MERCHANT_ADMIN' && req.user!.merchantId
+      ? req.user!.merchantId
+      : String(req.body?.merchantId ?? '');
   const provider = String(req.body?.provider ?? '').toUpperCase();
   const accountNumber = String(req.body?.accountNumber ?? '').trim();
   const accountType = String(req.body?.accountType ?? 'MERCHANT').toUpperCase();
   const accountTitle = String(req.body?.accountTitle ?? '').trim();
+  const bankName = req.body?.bankName ? String(req.body.bankName).trim() : null;
   const dailyLimitBdt = Number(req.body?.dailyLimitBdt ?? 250000);
 
-  if (!merchantId || !['BKASH', 'NAGAD', 'ROCKET'].includes(provider) || !accountNumber || !accountTitle) {
-    res.status(400).json({ error: 'merchantId, provider (BKASH/NAGAD/ROCKET), accountNumber, and accountTitle are required' });
+  if (!merchantId || !VALID_PROVIDERS.includes(provider) || !accountNumber || !accountTitle) {
+    res.status(400).json({ error: 'merchantId, valid provider, accountNumber, and accountTitle are required' });
     return;
   }
 
@@ -189,9 +209,9 @@ merchantRoutes.post('/wallets', requireAuth, requireRole('SUPER_ADMIN', 'OPERATI
   const id = newId();
   try {
     await db.execute(
-      `INSERT INTO mfs_wallets (id, merchant_id, provider, account_number, account_type, account_title, daily_limit_bdt, daily_received_bdt, is_active, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, 0, 1, ?)`,
-      [id, merchantId, provider, accountNumber, accountType, accountTitle, dailyLimitBdt, isoNow()],
+      `INSERT INTO mfs_wallets (id, merchant_id, provider, account_number, account_type, account_title, bank_name, daily_limit_bdt, daily_received_bdt, is_active, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 1, ?)`,
+      [id, merchantId, provider, accountNumber, accountType, accountTitle, bankName, dailyLimitBdt, isoNow()],
     );
   } catch (err) {
     res.status(409).json({ error: err instanceof Error ? err.message : 'Wallet already exists' });
@@ -206,8 +226,50 @@ merchantRoutes.post('/wallets', requireAuth, requireRole('SUPER_ADMIN', 'OPERATI
     resourceType: 'mfs_wallet',
     resourceId: id,
     ipAddress: req.ip ?? null,
-    afterState: { merchantId, provider, accountNumber, accountType },
+    afterState: { merchantId, provider, accountNumber, accountType, bankName },
   });
 
-  res.status(201).json({ id, merchantId, provider, accountNumber, accountType, accountTitle, dailyLimitBdt });
+  res.status(201).json({ id, merchantId, provider, accountNumber, accountType, accountTitle, bankName, dailyLimitBdt });
+});
+
+merchantRoutes.post('/websites', requireAuth, requireRole('SUPER_ADMIN', 'OPERATIONS', 'MERCHANT_ADMIN'), async (req: AuthedRequest, res) => {
+  const merchantId =
+    req.user!.role === 'MERCHANT_ADMIN' && req.user!.merchantId
+      ? req.user!.merchantId
+      : String(req.body?.merchantId ?? '');
+  const siteName = String(req.body?.siteName ?? '').trim();
+  const domain = String(req.body?.domain ?? '').trim().toLowerCase();
+  const platform = String(req.body?.platform ?? 'CUSTOM').toUpperCase();
+  const callbackUrl = req.body?.callbackUrl ? String(req.body.callbackUrl).trim() : null;
+
+  if (!merchantId || !siteName || !domain) {
+    res.status(400).json({ error: 'merchantId, siteName, and domain are required' });
+    return;
+  }
+
+  const db = getDb();
+  const id = newId();
+  try {
+    await db.execute(
+      `INSERT INTO merchant_websites (id, merchant_id, site_name, domain, platform, callback_url, is_active, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, 1, ?)`,
+      [id, merchantId, siteName, domain, platform, callbackUrl, isoNow()],
+    );
+  } catch (err) {
+    res.status(409).json({ error: err instanceof Error ? err.message : 'Domain already registered for merchant' });
+    return;
+  }
+
+  await recordAuditLog({
+    actorType: 'USER',
+    actorId: req.user!.id,
+    actorEmail: req.user!.email,
+    action: 'MERCHANT_WEBSITE_ADDED',
+    resourceType: 'merchant_website',
+    resourceId: id,
+    ipAddress: req.ip ?? null,
+    afterState: { merchantId, siteName, domain, platform },
+  });
+
+  res.status(201).json({ id, merchantId, siteName, domain, platform, callbackUrl });
 });

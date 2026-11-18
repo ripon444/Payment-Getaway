@@ -1,7 +1,13 @@
 import { useCallback, useEffect, useState } from 'react';
-import { CheckCircle2, ExternalLink, Plus, Search, ShieldCheck, X } from 'lucide-react';
+import { CheckCircle2, ExternalLink, Plus, QrCode, Search, ShieldCheck, X } from 'lucide-react';
 import { apiFetch, formatBdt, formatTimestamp } from '../lib/api.ts';
-import type { AuthUser, MerchantRow, PaymentIntentRow, ProviderCode } from '../types/gateway.ts';
+import {
+  ALL_PROVIDERS,
+  type AuthUser,
+  type MerchantRow,
+  type PaymentIntentRow,
+  type ProviderCode,
+} from '../types/gateway.ts';
 import { PaymentStatusLabel, ProviderLabel } from './StatusText.tsx';
 
 interface PaymentDetailResponse {
@@ -15,6 +21,10 @@ interface PaymentDetailResponse {
     parsed_trx_id: string | null;
     parsed_amount_bdt: number | null;
     parsed_sender_phone: string | null;
+    parsed_receiver_account: string | null;
+    parsed_bank_name: string | null;
+    parser_module: string | null;
+    source_channel: string | null;
     device_name: string | null;
     received_at: string;
   }>;
@@ -64,7 +74,6 @@ export function PaymentsTab({
   const [detail, setDetail] = useState<PaymentDetailResponse | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
 
-  // Manual verification form state
   const [verifyTrxId, setVerifyTrxId] = useState('');
   const [verifyAmount, setVerifyAmount] = useState('');
   const [evidenceRef, setEvidenceRef] = useState('');
@@ -72,10 +81,10 @@ export function PaymentsTab({
   const [verifyError, setVerifyError] = useState<string | null>(null);
   const [verifyBusy, setVerifyBusy] = useState(false);
 
-  // Create Payment modal
   const [showCreate, setShowCreate] = useState(false);
-  const [newMerchantId, setNewMerchantId] = useState(merchants[0]?.id ?? '');
+  const [newMerchantId, setNewMerchantId] = useState(user.merchantId ?? merchants[0]?.id ?? '');
   const [newProvider, setNewProvider] = useState<ProviderCode>('BKASH');
+  const [newAccountMode, setNewAccountMode] = useState('MERCHANT');
   const [newAmount, setNewAmount] = useState('1500');
   const [newOrderId, setNewOrderId] = useState('');
   const [newCustomerName, setNewCustomerName] = useState('');
@@ -83,10 +92,10 @@ export function PaymentsTab({
   const [createError, setCreateError] = useState<string | null>(null);
 
   useEffect(() => {
-    if (!newMerchantId && merchants.length > 0) {
-      setNewMerchantId(merchants[0].id);
+    if (!newMerchantId && (user.merchantId || merchants.length > 0)) {
+      setNewMerchantId(user.merchantId ?? merchants[0]?.id ?? '');
     }
-  }, [merchants, newMerchantId]);
+  }, [merchants, newMerchantId, user.merchantId]);
 
   const loadPayments = useCallback(async () => {
     setLoading(true);
@@ -184,6 +193,7 @@ export function PaymentsTab({
         body: JSON.stringify({
           merchantId: newMerchantId,
           provider: newProvider,
+          accountMode: newAccountMode,
           amountBdt: Number(newAmount),
           merchantOrderId: newOrderId.trim() || `ORD-${Date.now().toString().slice(-6)}`,
           customerName: newCustomerName.trim() || null,
@@ -216,7 +226,7 @@ export function PaymentsTab({
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
               placeholder="Search order ID, TrxID, phone..."
-              className="pl-9 pr-3 py-2 text-xs bg-slate-50 border border-slate-200 rounded-lg w-64 focus:outline-none focus:bg-white focus:border-teal-700"
+              className="pl-9 pr-3 py-2 text-xs bg-slate-50 border border-slate-200 rounded-lg w-60 focus:outline-none focus:bg-white focus:border-teal-700"
             />
           </div>
 
@@ -225,31 +235,27 @@ export function PaymentsTab({
             onChange={(e) => setStatusFilter(e.target.value)}
             className="px-3 py-2 text-xs bg-slate-50 border border-slate-200 rounded-lg text-slate-700 focus:outline-none focus:border-teal-700"
           >
-            <option value="ALL">All Statuses</option>
-            <option value="CANDIDATE_MATCHED">Candidate Matched</option>
-            <option value="MANUAL_REVIEW_REQUIRED">Manual Review Required</option>
-            <option value="CUSTOMER_SUBMITTED">Customer Submitted</option>
-            <option value="CREATED">Created / Awaiting</option>
-            <option value="VERIFIED_SETTLED">Verified Settled</option>
-            <option value="REJECTED">Rejected</option>
+            <option value="ALL">All 8 Statuses</option>
+            <option value="PENDING">PENDING</option>
+            <option value="DETECTED">DETECTED</option>
+            <option value="MATCHED">MATCHED</option>
+            <option value="REVIEW_REQUIRED">REVIEW_REQUIRED</option>
+            <option value="VERIFIED">VERIFIED</option>
+            <option value="SUCCESS">SUCCESS</option>
+            <option value="FAILED">FAILED</option>
+            <option value="EXPIRED">EXPIRED</option>
           </select>
 
-          <div className="flex items-center gap-1 p-1 bg-slate-100 rounded-lg">
-            {(['ALL', 'BKASH', 'NAGAD', 'ROCKET'] as const).map((p) => (
-              <button
-                key={p}
-                type="button"
-                onClick={() => setProviderFilter(p)}
-                className={`px-2.5 py-1 text-xs font-medium rounded-md transition-colors whitespace-nowrap ${
-                  providerFilter === p
-                    ? 'bg-white text-slate-900 shadow-xs'
-                    : 'text-slate-600 hover:text-slate-900'
-                }`}
-              >
-                {p === 'ALL' ? 'All Providers' : p === 'BKASH' ? 'bKash' : p === 'NAGAD' ? 'Nagad' : 'Rocket'}
-              </button>
+          <select
+            value={providerFilter}
+            onChange={(e) => setProviderFilter(e.target.value)}
+            className="px-3 py-2 text-xs bg-slate-50 border border-slate-200 rounded-lg text-slate-700 focus:outline-none focus:border-teal-700"
+          >
+            <option value="ALL">All 7 Payment Methods</option>
+            {ALL_PROVIDERS.map((p) => (
+              <option key={p.code} value={p.code}>{p.label}</option>
             ))}
-          </div>
+          </select>
         </div>
 
         <button
@@ -258,7 +264,7 @@ export function PaymentsTab({
           className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-medium text-white bg-teal-700 hover:bg-teal-800 rounded-lg transition-colors whitespace-nowrap shrink-0"
         >
           <Plus className="h-4 w-4" />
-          <span>Create Payment Intent</span>
+          <span>Create Payment Session</span>
         </button>
       </div>
 
@@ -270,7 +276,7 @@ export function PaymentsTab({
               <tr className="border-b border-slate-200 bg-slate-50/70 text-xs font-medium text-slate-500">
                 <th className="py-2.5 px-4">Order / Reference</th>
                 <th className="py-2.5 px-4">Merchant</th>
-                <th className="py-2.5 px-4">Provider</th>
+                <th className="py-2.5 px-4">Method</th>
                 <th className="py-2.5 px-4 text-right">Amount</th>
                 <th className="py-2.5 px-4">Submitted TrxID</th>
                 <th className="py-2.5 px-4">Confidence</th>
@@ -282,13 +288,13 @@ export function PaymentsTab({
               {loading ? (
                 <tr>
                   <td colSpan={8} className="py-10 text-center text-xs text-slate-500">
-                    Loading payment intents...
+                    Loading payment sessions...
                   </td>
                 </tr>
               ) : payments.length === 0 ? (
                 <tr>
                   <td colSpan={8} className="py-10 text-center text-xs text-slate-500">
-                    No payment intents match the active filters.
+                    No payment sessions match the active filters.
                   </td>
                 </tr>
               ) : (
@@ -348,7 +354,7 @@ export function PaymentsTab({
         </div>
       </div>
 
-      {/* Payment Inspector Slide-over / Detail Panel */}
+      {/* Payment Inspector Panel */}
       {selectedPaymentId && (
         <div className="bg-white border border-slate-200 rounded-xl p-6 space-y-6">
           <div className="flex items-start justify-between gap-4 border-b border-slate-200 pb-4">
@@ -383,11 +389,11 @@ export function PaymentsTab({
             <p className="text-xs text-slate-500 py-6">Loading verification & candidate details...</p>
           ) : (
             <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-              {/* Left: Payment & Candidate Evidence */}
+              {/* Left: Evidence */}
               <div className="lg:col-span-7 space-y-5">
                 <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 p-4 bg-slate-50 border border-slate-200 rounded-lg">
                   <div>
-                    <p className="text-xs text-slate-500">Provider</p>
+                    <p className="text-xs text-slate-500">Method</p>
                     <div className="mt-1"><ProviderLabel provider={detail.payment.provider} /></div>
                   </div>
                   <div>
@@ -408,13 +414,25 @@ export function PaymentsTab({
                   </div>
                 </div>
 
+                {detail.payment.bangla_qr_string && (
+                  <div className="p-3.5 bg-teal-50/60 border border-teal-200 rounded-lg space-y-1">
+                    <div className="flex items-center gap-1.5 text-xs font-semibold text-teal-900">
+                      <QrCode className="h-3.5 w-3.5" />
+                      <span>EMVCo Bangla QR Payload</span>
+                    </div>
+                    <p className="text-xs font-mono text-teal-900 break-all">
+                      {detail.payment.bangla_qr_string}
+                    </p>
+                  </div>
+                )}
+
                 <div>
                   <h4 className="text-xs font-semibold text-slate-700 mb-2">
-                    Matched Android Notification Candidates ({detail.candidates.length})
+                    Matched Android SMS / Notification Candidates ({detail.candidates.length})
                   </h4>
                   {detail.candidates.length === 0 ? (
                     <p className="text-xs text-slate-500 p-4 border border-slate-200 rounded-lg">
-                      No Android notification candidates linked yet. Use Notifications & Parser Sandbox to simulate or await live device ingestion.
+                      No Android notification or SMS candidates linked yet.
                     </p>
                   ) : (
                     <div className="space-y-2.5">
@@ -422,9 +440,10 @@ export function PaymentsTab({
                         const reasons: string[] = JSON.parse(cand.match_reasons_json || '[]');
                         return (
                           <div key={cand.id} className="p-3.5 border border-slate-200 rounded-lg space-y-1.5">
-                            <div className="flex items-center justify-between text-xs">
+                            <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
                               <span className="font-medium text-slate-900">
-                                {cand.device_name || 'Android Device'} · Confidence {cand.confidence_score}%
+                                {cand.device_name || 'Android Device'} · {cand.source_channel || 'NOTIFICATION'} ·{' '}
+                                {cand.parser_module || 'parser'} · Score {cand.confidence_score}%
                               </span>
                               <span className="font-mono text-slate-500">{formatTimestamp(cand.received_at)}</span>
                             </div>
@@ -433,6 +452,8 @@ export function PaymentsTab({
                             </p>
                             <p className="text-xs text-slate-500">
                               Signals: {reasons.join(' · ')}
+                              {cand.parsed_bank_name ? ` · Bank: ${cand.parsed_bank_name}` : ''}
+                              {cand.parsed_receiver_account ? ` · Receiver: ${cand.parsed_receiver_account}` : ''}
                             </p>
                           </div>
                         );
@@ -447,7 +468,7 @@ export function PaymentsTab({
                   </h4>
                   {detail.verifications.length === 0 ? (
                     <p className="text-xs text-slate-500 p-3.5 border border-slate-200 rounded-lg">
-                      No authoritative verification recorded yet. Notification candidates do not settle payments.
+                      No authoritative verification recorded yet. SMS/notification candidates alone never set SUCCESS.
                     </p>
                   ) : (
                     <div className="space-y-2">
@@ -481,20 +502,20 @@ export function PaymentsTab({
                   <h4 className="text-sm font-semibold">Settlement Verification</h4>
                 </div>
 
-                {detail.payment.status === 'VERIFIED_SETTLED' ? (
+                {detail.payment.status === 'SUCCESS' ? (
                   <div className="p-4 bg-emerald-50 border border-emerald-200 rounded-lg text-xs text-emerald-900">
-                    This payment is verified and settled. Duplicate TrxID protection is locked for {detail.payment.submitted_trx_id}.
+                    This payment is verified and settled (SUCCESS). Duplicate TrxID protection is locked for {detail.payment.submitted_trx_id}.
                   </div>
                 ) : (
                   <>
                     <p className="text-xs text-slate-600 leading-relaxed">
-                      Choose either official Provider Verification API (requires configured merchant credentials) or Documented Manual Finance Verification with an independent statement reference.
+                      Verify via Official Provider API (requires merchant API credentials in .env) or record Documented Manual Finance Verification with an independent statement reference.
                     </p>
 
                     <div className="space-y-3">
                       <div>
                         <label className="block text-xs font-medium text-slate-700 mb-1">
-                          Provider TrxID
+                          Provider TrxID / Reference
                         </label>
                         <input
                           type="text"
@@ -522,7 +543,7 @@ export function PaymentsTab({
 
                       {!canManualVerify ? (
                         <p className="text-xs text-amber-700">
-                          Requires SUPER_ADMIN or FINANCE_REVIEWER role to record manual settlement verification.
+                          Requires SUPER_ADMIN or FINANCE_REVIEWER role to approve final settlement.
                         </p>
                       ) : (
                         <>
@@ -547,7 +568,7 @@ export function PaymentsTab({
                               type="text"
                               value={evidenceRef}
                               onChange={(e) => setEvidenceRef(e.target.value)}
-                              placeholder="e.g. BKASH-PORTAL-STMT-2026-11-17-98412"
+                              placeholder="e.g. CITYBANK-NPSB-STMT-2026-11-17"
                               className="w-full px-3 py-2 text-xs font-mono border border-slate-300 rounded-lg"
                             />
                           </div>
@@ -560,7 +581,7 @@ export function PaymentsTab({
                               rows={2}
                               value={verifyNotes}
                               onChange={(e) => setVerifyNotes(e.target.value)}
-                              placeholder="Verified in bKash merchant portal daily statement..."
+                              placeholder="Verified against official merchant/bank portal ledger..."
                               className="w-full px-3 py-2 text-xs border border-slate-300 rounded-lg"
                             />
                           </div>
@@ -578,7 +599,7 @@ export function PaymentsTab({
                               onClick={() => handleManualVerify('VERIFIED')}
                               className="py-2 px-3 text-xs font-medium text-white bg-teal-700 hover:bg-teal-800 rounded-lg transition-colors disabled:opacity-50"
                             >
-                              Approve & Settle
+                              Approve & Settle (SUCCESS)
                             </button>
                             <button
                               type="button"
@@ -586,7 +607,7 @@ export function PaymentsTab({
                               onClick={() => handleManualVerify('REJECTED')}
                               className="py-2 px-3 text-xs font-medium text-rose-700 bg-rose-50 hover:bg-rose-100 border border-rose-200 rounded-lg transition-colors disabled:opacity-50"
                             >
-                              Reject Payment
+                              Mark FAILED
                             </button>
                           </div>
                         </>
@@ -605,37 +626,54 @@ export function PaymentsTab({
         <div className="fixed inset-0 z-50 bg-slate-900/40 flex items-center justify-center p-4">
           <div className="bg-white border border-slate-200 rounded-xl w-full max-w-md p-6 space-y-4">
             <div className="flex items-center justify-between">
-              <h3 className="text-base font-semibold text-slate-900">Create Payment Intent</h3>
+              <h3 className="text-base font-semibold text-slate-900">Create Payment Session</h3>
               <button type="button" onClick={() => setShowCreate(false)} className="text-slate-500 hover:text-slate-900">
                 <X className="h-4 w-4" />
               </button>
             </div>
             <form onSubmit={handleCreatePayment} className="space-y-3">
-              <div>
-                <label className="block text-xs font-medium text-slate-700 mb-1">Merchant</label>
-                <select
-                  value={newMerchantId}
-                  onChange={(e) => setNewMerchantId(e.target.value)}
-                  className="w-full px-3 py-2 text-xs border border-slate-300 rounded-lg"
-                >
-                  {merchants.map((m) => (
-                    <option key={m.id} value={m.id}>{m.name}</option>
-                  ))}
-                </select>
-              </div>
+              {user.role !== 'MERCHANT_ADMIN' && (
+                <div>
+                  <label className="block text-xs font-medium text-slate-700 mb-1">Merchant</label>
+                  <select
+                    value={newMerchantId}
+                    onChange={(e) => setNewMerchantId(e.target.value)}
+                    className="w-full px-3 py-2 text-xs border border-slate-300 rounded-lg"
+                  >
+                    {merchants.map((m) => (
+                      <option key={m.id} value={m.id}>{m.name}</option>
+                    ))}
+                  </select>
+                </div>
+              )}
               <div className="grid grid-cols-2 gap-3">
                 <div>
-                  <label className="block text-xs font-medium text-slate-700 mb-1">MFS Provider</label>
+                  <label className="block text-xs font-medium text-slate-700 mb-1">Payment Method</label>
                   <select
                     value={newProvider}
                     onChange={(e) => setNewProvider(e.target.value as ProviderCode)}
                     className="w-full px-3 py-2 text-xs border border-slate-300 rounded-lg"
                   >
-                    <option value="BKASH">bKash</option>
-                    <option value="NAGAD">Nagad</option>
-                    <option value="ROCKET">DBBL Rocket</option>
+                    {ALL_PROVIDERS.map((p) => (
+                      <option key={p.code} value={p.code}>{p.label}</option>
+                    ))}
                   </select>
                 </div>
+                <div>
+                  <label className="block text-xs font-medium text-slate-700 mb-1">Account Mode</label>
+                  <select
+                    value={newAccountMode}
+                    onChange={(e) => setNewAccountMode(e.target.value)}
+                    className="w-full px-3 py-2 text-xs border border-slate-300 rounded-lg"
+                  >
+                    <option value="MERCHANT">Merchant</option>
+                    <option value="PERSONAL">Personal</option>
+                    <option value="AGENT">Agent</option>
+                    <option value="BANK_ACCOUNT">Bank Account</option>
+                  </select>
+                </div>
+              </div>
+              <div className="grid grid-cols-2 gap-3">
                 <div>
                   <label className="block text-xs font-medium text-slate-700 mb-1">Amount (BDT)</label>
                   <input
@@ -648,16 +686,16 @@ export function PaymentsTab({
                     className="w-full px-3 py-2 text-xs font-mono border border-slate-300 rounded-lg"
                   />
                 </div>
-              </div>
-              <div>
-                <label className="block text-xs font-medium text-slate-700 mb-1">Merchant Order ID</label>
-                <input
-                  type="text"
-                  value={newOrderId}
-                  onChange={(e) => setNewOrderId(e.target.value)}
-                  placeholder="Optional (auto-generated if blank)"
-                  className="w-full px-3 py-2 text-xs font-mono border border-slate-300 rounded-lg"
-                />
+                <div>
+                  <label className="block text-xs font-medium text-slate-700 mb-1">Merchant Order ID</label>
+                  <input
+                    type="text"
+                    value={newOrderId}
+                    onChange={(e) => setNewOrderId(e.target.value)}
+                    placeholder="Auto if blank"
+                    className="w-full px-3 py-2 text-xs font-mono border border-slate-300 rounded-lg"
+                  />
+                </div>
               </div>
               <div className="grid grid-cols-2 gap-3">
                 <div>
@@ -696,7 +734,7 @@ export function PaymentsTab({
                   type="submit"
                   className="px-4 py-2 text-xs font-medium text-white bg-teal-700 hover:bg-teal-800 rounded-lg"
                 >
-                  Create Intent
+                  Create Session
                 </button>
               </div>
             </form>

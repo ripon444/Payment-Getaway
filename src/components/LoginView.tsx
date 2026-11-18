@@ -73,27 +73,27 @@ export function LoginView({ onLoginSuccess }: LoginViewProps) {
               <span>TakaLedger Gateway</span>
             </div>
             <h1 className="mt-6 text-2xl font-semibold tracking-tight text-white text-balance">
-              Bangladesh Multi-Merchant MFS Payment Operations
+              Bangladesh Multi-Merchant Automated Payment Verification
             </h1>
             <p className="mt-3 text-sm text-slate-300 leading-relaxed">
-              Manage bKash, Nagad, and DBBL Rocket payment intents, paired Android notification agents, candidate matching, and verified settlements.
+              Manage bKash, Nagad, Rocket, Upay, Islami Bank CellFin, Bangla QR, and Bank SMS sessions, paired Android listeners, and verified merchant settlements.
             </p>
           </div>
 
           <div className="mt-10 pt-6 border-t border-slate-800 space-y-2.5 text-xs text-slate-300">
             <p className="font-medium text-white">Settlement Compliance Guardrails</p>
-            <p>1. Android notifications create candidate matches only.</p>
-            <p>2. Settlements require official Provider API verification or documented manual finance review.</p>
-            <p>3. OTP and PIN notifications are redacted prior to ingestion.</p>
+            <p>1. Android SMS/notifications create MATCHED candidates only—never auto-settled.</p>
+            <p>2. SUCCESS requires official Provider API verification or documented finance verification.</p>
+            <p>3. OTP and PIN messages are stripped before storage or transmission.</p>
           </div>
         </div>
 
         <div className="lg:col-span-7 p-8 sm:p-10">
           <div className="flex items-center gap-2 text-slate-500 text-xs font-medium">
             <Lock className="h-3.5 w-3.5" />
-            <span>Authorized Operator Sign-In</span>
+            <span>Authorized Operator & Merchant Sign-In</span>
           </div>
-          <h2 className="mt-2 text-xl font-semibold text-slate-900">Sign in to Operations Console</h2>
+          <h2 className="mt-2 text-xl font-semibold text-slate-900">Sign in to Gateway Console</h2>
 
           <form onSubmit={handleSubmit} className="mt-6 space-y-4">
             <div>
@@ -147,7 +147,7 @@ export function LoginView({ onLoginSuccess }: LoginViewProps) {
                 Development Sandbox Access
               </p>
               <p className="mt-1 text-xs text-slate-500">
-                Quick-launch a role session without embedding credentials in client source code.
+                Launch either the Platform Admin Console or tenant-scoped Merchant Dashboard.
               </p>
               <div className="mt-3 grid grid-cols-1 sm:grid-cols-3 gap-2">
                 <button
@@ -170,9 +170,9 @@ export function LoginView({ onLoginSuccess }: LoginViewProps) {
                   type="button"
                   disabled={loading}
                   onClick={() => handleDevRoleSignIn('MERCHANT_ADMIN')}
-                  className="px-3 py-2 text-xs font-medium text-slate-800 bg-slate-100 hover:bg-slate-200 border border-slate-200 rounded-lg transition-colors whitespace-nowrap"
+                  className="px-3 py-2 text-xs font-medium text-teal-800 bg-teal-50 hover:bg-teal-100 border border-teal-200 rounded-lg transition-colors whitespace-nowrap"
                 >
-                  Merchant Admin
+                  Merchant Portal
                 </button>
               </div>
             </div>

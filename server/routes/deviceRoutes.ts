@@ -4,6 +4,7 @@ import { env } from '../config/env.ts';
 import { getDb, isoNow } from '../db/client.ts';
 import { requireAuth, requireDeviceAuth, requireRole } from '../middleware/auth.ts';
 import type { AuthedRequest } from '../middleware/auth.ts';
+import { emitDeviceTelemetry } from '../realtime/socket.ts';
 import { recordAuditLog } from '../services/auditService.ts';
 import {
   encryptSecret,
@@ -28,6 +29,7 @@ deviceRoutes.get('/', requireAuth, async (req: AuthedRequest, res) => {
     android_model: string | null;
     android_version: string | null;
     app_version: string | null;
+    sim_slots_json: string | null;
     pairing_code: string | null;
     pairing_expires_at: string | null;
     assigned_providers_json: string;
@@ -39,9 +41,9 @@ deviceRoutes.get('/', requireAuth, async (req: AuthedRequest, res) => {
     created_at: string;
   }>(
     `SELECT d.id, d.merchant_id, m.name AS merchant_name, d.device_uid, d.device_name,
-            d.android_model, d.android_version, d.app_version, d.pairing_code, d.pairing_expires_at,
-            d.assigned_providers_json, d.status, d.last_heartbeat_at, d.battery_pct,
-            d.network_type, d.queue_depth, d.created_at
+            d.android_model, d.android_version, d.app_version, d.sim_slots_json, d.pairing_code,
+            d.pairing_expires_at, d.assigned_providers_json, d.status, d.last_heartbeat_at,
+            d.battery_pct, d.network_type, d.queue_depth, d.created_at
      FROM devices d
      LEFT JOIN merchants m ON m.id = d.merchant_id
      ${isScoped ? 'WHERE d.merchant_id = ?' : ''}
@@ -49,8 +51,8 @@ deviceRoutes.get('/', requireAuth, async (req: AuthedRequest, res) => {
     isScoped ? [req.user!.merchantId!] : [],
   );
 
-  const mappings = await db.query<{ device_id: string; wallet_id: string; provider: string; account_number: string }>(
-    `SELECT dw.device_id, dw.wallet_id, w.provider, w.account_number
+  const mappings = await db.query<{ device_id: string; wallet_id: string; provider: string; account_number: string; sim_slot: number | null }>(
+    `SELECT dw.device_id, dw.wallet_id, w.provider, w.account_number, dw.sim_slot
      FROM device_wallets dw
      JOIN mfs_wallets w ON w.id = dw.wallet_id`,
   );
@@ -58,6 +60,7 @@ deviceRoutes.get('/', requireAuth, async (req: AuthedRequest, res) => {
   const enriched = devices.map((d) => ({
     ...d,
     assignedProviders: JSON.parse(d.assigned_providers_json || '[]'),
+    simSlots: JSON.parse(d.sim_slots_json || '[]'),
     assignedWallets: mappings.filter((m) => m.device_id === d.id),
   }));
 
@@ -67,13 +70,18 @@ deviceRoutes.get('/', requireAuth, async (req: AuthedRequest, res) => {
 deviceRoutes.post(
   '/pairing-code',
   requireAuth,
-  requireRole('SUPER_ADMIN', 'OPERATIONS'),
+  requireRole('SUPER_ADMIN', 'OPERATIONS', 'MERCHANT_ADMIN'),
   async (req: AuthedRequest, res) => {
     const deviceName = String(req.body?.deviceName ?? '').trim();
-    const merchantId = req.body?.merchantId ? String(req.body.merchantId) : null;
+    const merchantId =
+      req.user!.role === 'MERCHANT_ADMIN' && req.user!.merchantId
+        ? req.user!.merchantId
+        : req.body?.merchantId
+          ? String(req.body.merchantId)
+          : null;
     const assignedProviders = Array.isArray(req.body?.assignedProviders)
       ? req.body.assignedProviders.map((p: unknown) => String(p).toUpperCase())
-      : ['BKASH', 'NAGAD', 'ROCKET'];
+      : ['BKASH', 'NAGAD', 'ROCKET', 'UPAY', 'CELLFIN', 'BANGLA_QR', 'BANK_SMS'];
     const walletIds = Array.isArray(req.body?.walletIds) ? req.body.walletIds.map(String) : [];
 
     if (!deviceName) {
@@ -133,13 +141,14 @@ deviceRoutes.post(
   },
 );
 
-// Public Android Agent Pairing Handshake
+// Android Agent Pairing Handshake
 deviceRoutes.post('/pair', async (req, res) => {
   const pairingCode = String(req.body?.pairingCode ?? '').trim().toUpperCase();
   const deviceUid = String(req.body?.deviceUid ?? '').trim();
   const androidModel = String(req.body?.androidModel ?? 'Android Device').trim();
   const androidVersion = String(req.body?.androidVersion ?? 'Unknown').trim();
-  const appVersion = String(req.body?.appVersion ?? '1.0.0').trim();
+  const appVersion = String(req.body?.appVersion ?? '2.0.0').trim();
+  const simSlots = Array.isArray(req.body?.simSlots) ? req.body.simSlots : [];
 
   if (!pairingCode || !deviceUid) {
     res.status(400).json({ error: 'pairingCode and deviceUid are required' });
@@ -165,7 +174,7 @@ deviceRoutes.post('/pair', async (req, res) => {
   }
 
   if (device.pairing_expires_at && new Date(device.pairing_expires_at.replace(' ', 'T') + 'Z') < new Date()) {
-    res.status(410).json({ error: 'Pairing code expired; request a new pairing code from Admin Dashboard' });
+    res.status(410).json({ error: 'Pairing code expired; request a new pairing code from Dashboard' });
     return;
   }
 
@@ -176,7 +185,7 @@ deviceRoutes.post('/pair', async (req, res) => {
   await db.execute(
     `UPDATE devices
      SET device_uid = ?, android_model = ?, android_version = ?, app_version = ?,
-         pairing_code = NULL, pairing_expires_at = NULL,
+         sim_slots_json = ?, pairing_code = NULL, pairing_expires_at = NULL,
          device_token_hash = ?, hmac_secret_enc = ?,
          status = 'ACTIVE', last_heartbeat_at = ?, updated_at = ?
      WHERE id = ?`,
@@ -185,6 +194,7 @@ deviceRoutes.post('/pair', async (req, res) => {
       androidModel,
       androidVersion,
       appVersion,
+      JSON.stringify(simSlots),
       sha256Hex(rawDeviceToken),
       encryptSecret(rawHmacSecret),
       now,
@@ -192,6 +202,15 @@ deviceRoutes.post('/pair', async (req, res) => {
       device.id,
     ],
   );
+
+  emitDeviceTelemetry({
+    deviceId: device.id,
+    merchantId: device.merchant_id,
+    status: 'ACTIVE',
+    batteryPct: null,
+    networkType: null,
+    queueDepth: 0,
+  });
 
   await recordAuditLog({
     actorType: 'DEVICE',
@@ -201,7 +220,7 @@ deviceRoutes.post('/pair', async (req, res) => {
     resourceType: 'device',
     resourceId: device.id,
     ipAddress: req.ip ?? null,
-    afterState: { deviceUid, androidModel, androidVersion, appVersion },
+    afterState: { deviceUid, androidModel, androidVersion, appVersion, simSlots },
   });
 
   res.json({
@@ -220,15 +239,26 @@ deviceRoutes.post('/heartbeat', requireDeviceAuth, async (req: AuthedRequest, re
   const batteryPct = req.body?.batteryPct !== undefined ? Number(req.body.batteryPct) : null;
   const networkType = req.body?.networkType ? String(req.body.networkType) : null;
   const queueDepth = req.body?.queueDepth !== undefined ? Number(req.body.queueDepth) : 0;
+  const simSlots = Array.isArray(req.body?.simSlots) ? JSON.stringify(req.body.simSlots) : null;
 
   const db = getDb();
   await db.execute(
     `UPDATE devices
      SET last_heartbeat_at = ?, battery_pct = COALESCE(?, battery_pct),
-         network_type = COALESCE(?, network_type), queue_depth = ?, updated_at = ?
+         network_type = COALESCE(?, network_type), queue_depth = ?,
+         sim_slots_json = COALESCE(?, sim_slots_json), updated_at = ?
      WHERE id = ?`,
-    [isoNow(), batteryPct, networkType, queueDepth, isoNow(), req.device!.id],
+    [isoNow(), batteryPct, networkType, queueDepth, simSlots, isoNow(), req.device!.id],
   );
+
+  emitDeviceTelemetry({
+    deviceId: req.device!.id,
+    merchantId: req.device!.merchantId,
+    status: req.device!.status,
+    batteryPct,
+    networkType,
+    queueDepth,
+  });
 
   res.json({ ok: true, serverTimeMs: Date.now(), status: req.device!.status });
 });
@@ -236,15 +266,19 @@ deviceRoutes.post('/heartbeat', requireDeviceAuth, async (req: AuthedRequest, re
 deviceRoutes.patch(
   '/:id',
   requireAuth,
-  requireRole('SUPER_ADMIN', 'OPERATIONS'),
+  requireRole('SUPER_ADMIN', 'OPERATIONS', 'MERCHANT_ADMIN'),
   async (req: AuthedRequest, res) => {
     const db = getDb();
-    const existing = await db.queryOne<{ id: string; status: string; device_name: string }>(
-      'SELECT id, status, device_name FROM devices WHERE id = ?',
+    const existing = await db.queryOne<{ id: string; merchant_id: string | null; status: string; device_name: string }>(
+      'SELECT id, merchant_id, status, device_name FROM devices WHERE id = ?',
       [req.params.id],
     );
     if (!existing) {
       res.status(404).json({ error: 'Device not found' });
+      return;
+    }
+    if (req.user!.role === 'MERCHANT_ADMIN' && existing.merchant_id !== req.user!.merchantId) {
+      res.status(403).json({ error: 'Forbidden' });
       return;
     }
 

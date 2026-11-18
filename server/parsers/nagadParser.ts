@@ -23,12 +23,14 @@ export class NagadParser implements MfsProviderParser {
       return {
         provider: 'NAGAD',
         parseStatus: 'IGNORED_SECURITY',
+        accountMode: null,
         txType: null,
         amountBdt: null,
         trxId: null,
         senderPhone: null,
-        receiverPhone: null,
+        receiverAccount: null,
         balanceBdt: null,
+        bankName: 'Nagad',
         reference: null,
         confidence: 0,
         redactedBody: '[REDACTED_OTP_OR_PIN_NOTIFICATION]',
@@ -41,6 +43,8 @@ export class NagadParser implements MfsProviderParser {
     const warnings: string[] = [];
 
     let txType: string | null = null;
+    let accountMode: 'PERSONAL' | 'MERCHANT' = /payment\s+received/i.test(body) ? 'MERCHANT' : 'PERSONAL';
+
     if (/money\s+received/i.test(body)) txType = 'MONEY_RECEIVED';
     else if (/payment\s+received/i.test(body)) txType = 'PAYMENT';
     else if (/cash[\s-]*in\s+received/i.test(body)) txType = 'CASH_IN';
@@ -50,12 +54,14 @@ export class NagadParser implements MfsProviderParser {
       return {
         provider: 'NAGAD',
         parseStatus: 'UNPARSED',
+        accountMode,
         txType: 'OUTGOING_DEBIT',
         amountBdt: null,
         trxId: null,
         senderPhone: null,
-        receiverPhone: null,
+        receiverAccount: null,
         balanceBdt: null,
+        bankName: 'Nagad',
         reference: null,
         confidence: 15,
         redactedBody: body,
@@ -88,17 +94,17 @@ export class NagadParser implements MfsProviderParser {
     if (!amountBdt) warnings.push('Missing Nagad BDT amount');
     if (!trxId) warnings.push('Missing Nagad TxnID');
 
-    const parseStatus = amountBdt !== null && trxId !== null ? 'PARSED' : 'UNPARSED';
-
     return {
       provider: 'NAGAD',
-      parseStatus,
+      parseStatus: amountBdt !== null && trxId !== null ? 'PARSED' : 'UNPARSED',
+      accountMode,
       txType: txType ?? 'INCOMING',
       amountBdt,
       trxId,
       senderPhone,
-      receiverPhone: null,
+      receiverAccount: null,
       balanceBdt,
+      bankName: 'Nagad',
       reference,
       confidence,
       redactedBody: body,

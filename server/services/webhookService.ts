@@ -1,12 +1,13 @@
 import { getDb, isoNow } from '../db/client.ts';
+import { emitWebhookDelivered } from '../realtime/socket.ts';
 import { buildWebhookSignatureHeader, decryptSecret, newId } from '../utils/crypto.ts';
 import { recordAuditLog } from './auditService.ts';
 
 export type WebhookEventType =
-  | 'payment.candidate_matched'
-  | 'payment.manual_review_required'
+  | 'payment.matched'
+  | 'payment.review_required'
   | 'payment.verified_settled'
-  | 'payment.rejected';
+  | 'payment.failed';
 
 interface MerchantWebhookConfig {
   id: string;
@@ -143,6 +144,14 @@ export async function attemptWebhookDelivery(deliveryId: string): Promise<{
      WHERE id = ?`,
     [nextAttempt, httpStatus, responseBody, status, nextRetryAt, isoNow(), deliveryId],
   );
+
+  emitWebhookDelivered({
+    deliveryId,
+    merchantId: row.merchant_id,
+    paymentIntentId: row.payment_intent_id,
+    status,
+    httpStatus,
+  });
 
   await recordAuditLog({
     actorType: 'SYSTEM',

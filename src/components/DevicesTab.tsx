@@ -1,7 +1,14 @@
 import { useState } from 'react';
-import { Battery, CheckCircle2, Copy, Plus, QrCode, Smartphone, Wifi, X } from 'lucide-react';
+import { Battery, BatteryCharging, CheckCircle2, Copy, Plus, QrCode, ShieldAlert, Smartphone, Wifi, X } from 'lucide-react';
 import { apiFetch, formatTimestamp } from '../lib/api.ts';
-import type { AuthUser, DeviceRow, MerchantRow, MfsWalletRow, ProviderCode } from '../types/gateway.ts';
+import {
+  ALL_PROVIDERS,
+  type AuthUser,
+  type DeviceRow,
+  type MerchantRow,
+  type MfsWalletRow,
+  type ProviderCode,
+} from '../types/gateway.ts';
 import { ProviderLabel } from './StatusText.tsx';
 
 interface DevicesTabProps {
@@ -24,17 +31,24 @@ interface PairingResult {
 export function DevicesTab({ user, devices, merchants, wallets, onRefresh }: DevicesTabProps) {
   const [showPairModal, setShowPairModal] = useState(false);
   const [deviceName, setDeviceName] = useState('');
-  const [merchantId, setMerchantId] = useState(merchants[0]?.id ?? '');
-  const [selectedProviders, setSelectedProviders] = useState<ProviderCode[]>(['BKASH', 'NAGAD']);
+  const [merchantId, setMerchantId] = useState(user.merchantId ?? merchants[0]?.id ?? '');
+  const [selectedProviders, setSelectedProviders] = useState<ProviderCode[]>([
+    'BKASH',
+    'NAGAD',
+    'ROCKET',
+    'UPAY',
+    'CELLFIN',
+    'BANGLA_QR',
+    'BANK_SMS',
+  ]);
   const [selectedWallets, setSelectedWallets] = useState<string[]>([]);
   const [pairingResult, setPairingResult] = useState<PairingResult | null>(null);
   const [pairError, setPairError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
-
-  // Test Android Handshake Simulator inside Pairing Modal
   const [simPairingDone, setSimPairingDone] = useState<string | null>(null);
 
-  const canManage = user.role === 'SUPER_ADMIN' || user.role === 'OPERATIONS';
+  const canManage =
+    user.role === 'SUPER_ADMIN' || user.role === 'OPERATIONS' || user.role === 'MERCHANT_ADMIN';
 
   function toggleProvider(p: ProviderCode) {
     setSelectedProviders((prev) =>
@@ -81,12 +95,16 @@ export function DevicesTab({ user, devices, merchants, wallets, onRefresh }: Dev
             deviceUid: `AND-SIM-${Math.random().toString(36).slice(2, 7).toUpperCase()}`,
             androidModel: 'Samsung Galaxy A15 (Test Agent)',
             androidVersion: 'Android 14',
-            appVersion: '1.4.2',
+            appVersion: '2.0.0',
+            simSlots: [
+              { slot: 1, carrier: 'Grameenphone' },
+              { slot: 2, carrier: 'Robi' },
+            ],
           }),
         },
         false,
       );
-      setSimPairingDone(`Paired as ${res.deviceName} — HMAC & Keystore credentials issued.`);
+      setSimPairingDone(`Paired as ${res.deviceName} — HMAC, Keystore & Dual-SIM slots registered.`);
       onRefresh();
     } catch (err) {
       setPairError(err instanceof Error ? err.message : 'Handshake simulation failed');
@@ -108,10 +126,10 @@ export function DevicesTab({ user, devices, merchants, wallets, onRefresh }: Dev
       <div className="bg-white border border-slate-200 rounded-xl p-5 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
           <h2 className="text-sm font-semibold text-slate-900">
-            Multi-Device Android Notification Agent Fleet
+            Multi-Device Android Notification & Dual-SIM Listener Fleet
           </h2>
           <p className="text-xs text-slate-500 mt-0.5">
-            Pair dedicated Android SIM devices using time-limited QR / pairing codes, assign MFS wallets, and monitor offline queue depth.
+            Pair Android listener devices via time-limited QR codes, bind multi-SIM wallets, and monitor encrypted Room offline queue depth.
           </p>
         </div>
 
@@ -130,6 +148,37 @@ export function DevicesTab({ user, devices, merchants, wallets, onRefresh }: Dev
             <span>Pair Android Device</span>
           </button>
         )}
+      </div>
+
+      {/* Android Security, Permission & Battery Guidance */}
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+        <div className="bg-white border border-slate-200 rounded-xl p-4 space-y-1.5">
+          <div className="flex items-center gap-2 text-xs font-semibold text-slate-900">
+            <ShieldAlert className="h-4 w-4 text-teal-700" />
+            <span>Notification & SMS Permissions</span>
+          </div>
+          <p className="text-xs text-slate-600 leading-relaxed">
+            Uses Android <span className="font-mono">NotificationListenerService</span> for bKash/Nagad/Rocket/Upay/CellFin alerts and optional <span className="font-mono">RECEIVE_SMS</span> for bank & Bangla QR SMS. Never accesses MFS PINs or automates UI clicks.
+          </p>
+        </div>
+        <div className="bg-white border border-slate-200 rounded-xl p-4 space-y-1.5">
+          <div className="flex items-center gap-2 text-xs font-semibold text-slate-900">
+            <BatteryCharging className="h-4 w-4 text-teal-700" />
+            <span>Battery & Background Reliability</span>
+          </div>
+          <p className="text-xs text-slate-600 leading-relaxed">
+            Enable <span className="font-mono">Unrestricted Battery</span> (<span className="font-mono">REQUEST_IGNORE_BATTERY_OPTIMIZATIONS</span>) on Xiaomi/Samsung/Vivo devices so Android Doze mode does not suspend listener or WorkManager sync.
+          </p>
+        </div>
+        <div className="bg-white border border-slate-200 rounded-xl p-4 space-y-1.5">
+          <div className="flex items-center gap-2 text-xs font-semibold text-slate-900">
+            <CheckCircle2 className="h-4 w-4 text-teal-700" />
+            <span>Encrypted Offline Queue & Sync</span>
+          </div>
+          <p className="text-xs text-slate-600 leading-relaxed">
+            OTP/PIN alerts are discarded locally on-device. Valid payment alerts persist to AES-GCM encrypted SQLite/Room storage and flush via HMAC-signed batch upload when internet resumes.
+          </p>
+        </div>
       </div>
 
       {/* Devices Grid */}
@@ -165,11 +214,15 @@ export function DevicesTab({ user, devices, merchants, wallets, onRefresh }: Dev
 
             <div className="grid grid-cols-3 gap-3 py-3 border-y border-slate-100 text-xs">
               <div>
-                <p className="text-slate-500">Hardware / OS</p>
+                <p className="text-slate-500">Hardware / SIM Slots</p>
                 <p className="mt-0.5 font-medium text-slate-900 truncate">
                   {dev.android_model || 'Pending'}
                 </p>
-                <p className="text-slate-500">{dev.android_version || '—'}</p>
+                <p className="text-slate-500 truncate">
+                  {dev.simSlots && dev.simSlots.length > 0
+                    ? dev.simSlots.map((s) => `SIM${s.slot}:${s.carrier}`).join(' · ')
+                    : dev.android_version || '—'}
+                </p>
               </div>
               <div>
                 <p className="text-slate-500">Telemetry</p>
@@ -199,7 +252,7 @@ export function DevicesTab({ user, devices, merchants, wallets, onRefresh }: Dev
             </div>
 
             <div className="flex flex-wrap items-center justify-between gap-3">
-              <div className="flex flex-wrap items-center gap-3">
+              <div className="flex flex-wrap items-center gap-2.5">
                 {dev.assignedProviders.map((prov) => (
                   <ProviderLabel key={prov} provider={prov} />
                 ))}
@@ -246,10 +299,10 @@ export function DevicesTab({ user, devices, merchants, wallets, onRefresh }: Dev
         ))}
       </div>
 
-      {/* Pair New Android Device Modal */}
+      {/* Pair Modal */}
       {showPairModal && (
         <div className="fixed inset-0 z-50 bg-slate-900/40 flex items-center justify-center p-4">
-          <div className="bg-white border border-slate-200 rounded-xl w-full max-w-lg p-6 space-y-5">
+          <div className="bg-white border border-slate-200 rounded-xl w-full max-w-lg p-6 space-y-5 max-h-[90vh] overflow-y-auto">
             <div className="flex items-center justify-between border-b border-slate-200 pb-3">
               <div className="flex items-center gap-2">
                 <QrCode className="h-4 w-4 text-teal-700" />
@@ -273,41 +326,43 @@ export function DevicesTab({ user, devices, merchants, wallets, onRefresh }: Dev
                     required
                     value={deviceName}
                     onChange={(e) => setDeviceName(e.target.value)}
-                    placeholder="e.g. Dhaka Mirpur SIM Node #3"
+                    placeholder="e.g. Dhaka Mirpur Dual-SIM Node #3"
                     className="w-full px-3 py-2 text-xs border border-slate-300 rounded-lg"
                   />
                 </div>
 
-                <div>
-                  <label className="block text-xs font-medium text-slate-700 mb-1">Assign Merchant</label>
-                  <select
-                    value={merchantId}
-                    onChange={(e) => setMerchantId(e.target.value)}
-                    className="w-full px-3 py-2 text-xs border border-slate-300 rounded-lg"
-                  >
-                    {merchants.map((m) => (
-                      <option key={m.id} value={m.id}>{m.name}</option>
-                    ))}
-                  </select>
-                </div>
+                {user.role !== 'MERCHANT_ADMIN' && (
+                  <div>
+                    <label className="block text-xs font-medium text-slate-700 mb-1">Assign Merchant</label>
+                    <select
+                      value={merchantId}
+                      onChange={(e) => setMerchantId(e.target.value)}
+                      className="w-full px-3 py-2 text-xs border border-slate-300 rounded-lg"
+                    >
+                      {merchants.map((m) => (
+                        <option key={m.id} value={m.id}>{m.name}</option>
+                      ))}
+                    </select>
+                  </div>
+                )}
 
                 <div>
                   <label className="block text-xs font-medium text-slate-700 mb-1.5">
-                    Monitored MFS Providers
+                    Monitored Payment Channels (All 7 Supported)
                   </label>
-                  <div className="flex gap-2">
-                    {(['BKASH', 'NAGAD', 'ROCKET'] as ProviderCode[]).map((p) => (
+                  <div className="flex flex-wrap gap-2">
+                    {ALL_PROVIDERS.map((p) => (
                       <button
-                        key={p}
+                        key={p.code}
                         type="button"
-                        onClick={() => toggleProvider(p)}
-                        className={`px-3 py-1.5 text-xs font-medium rounded-lg border ${
-                          selectedProviders.includes(p)
+                        onClick={() => toggleProvider(p.code)}
+                        className={`px-2.5 py-1.5 text-xs font-medium rounded-lg border ${
+                          selectedProviders.includes(p.code)
                             ? 'bg-teal-50 border-teal-700 text-teal-900'
                             : 'bg-white border-slate-200 text-slate-600'
                         }`}
                       >
-                        {p}
+                        {p.label}
                       </button>
                     ))}
                   </div>
@@ -315,7 +370,7 @@ export function DevicesTab({ user, devices, merchants, wallets, onRefresh }: Dev
 
                 <div>
                   <label className="block text-xs font-medium text-slate-700 mb-1.5">
-                    Bind Receiving Wallets (Optional)
+                    Bind Receiving Wallets / Bank Accounts (Optional)
                   </label>
                   <div className="space-y-1.5 max-h-32 overflow-y-auto border border-slate-200 rounded-lg p-2.5">
                     {merchantWallets.map((w) => (
@@ -379,7 +434,7 @@ export function DevicesTab({ user, devices, merchants, wallets, onRefresh }: Dev
                     </div>
                     {copied && <p className="text-xs text-emerald-700">Pairing code copied</p>}
                     <p className="text-xs text-slate-600">
-                      Open <strong>TakaLedger Agent</strong> on Android, grant Notification Listener access, and scan this QR or enter the pairing code.
+                      Open <strong>TakaLedger Agent</strong> on Android, grant Notification Listener (and optional SMS) permission, disable battery restrictions, and enter this pairing code.
                     </p>
                   </div>
                 </div>

@@ -1,15 +1,18 @@
-import { ArrowRight, ExternalLink, ShieldCheck } from 'lucide-react';
+import { AlertTriangle, ArrowRight, ExternalLink, ShieldCheck } from 'lucide-react';
 import { formatBdt, formatTimestamp } from '../lib/api.ts';
-import type { PaymentIntentRow } from '../types/gateway.ts';
+import { ALL_PROVIDERS, type PaymentIntentRow } from '../types/gateway.ts';
 import { PaymentStatusLabel, ProviderLabel } from './StatusText.tsx';
 
 export interface OverviewData {
   totals: {
     total_count: number;
     settled_volume_bdt: number;
-    candidate_count: number;
+    pending_count: number;
+    detected_count: number;
+    matched_count: number;
     review_count: number;
-    settled_count: number;
+    success_count: number;
+    failed_count: number;
   };
   byProvider: Array<{
     provider: string;
@@ -25,17 +28,25 @@ export interface OverviewData {
     delivered: number;
     total: number;
   };
+  openFraudAlerts?: number;
   verificationQueue: PaymentIntentRow[];
 }
 
 interface OverviewTabProps {
   data: OverviewData | null;
   loading: boolean;
+  isMerchantView?: boolean;
   onInspectPayment: (id: string) => void;
-  onNavigateTab: (tab: 'payments' | 'devices' | 'notifications') => void;
+  onNavigateTab: (tab: 'payments' | 'devices' | 'notifications' | 'fraud') => void;
 }
 
-export function OverviewTab({ data, loading, onInspectPayment, onNavigateTab }: OverviewTabProps) {
+export function OverviewTab({
+  data,
+  loading,
+  isMerchantView = false,
+  onInspectPayment,
+  onNavigateTab,
+}: OverviewTabProps) {
   if (loading && !data) {
     return (
       <div className="space-y-6">
@@ -52,27 +63,32 @@ export function OverviewTab({ data, loading, onInspectPayment, onNavigateTab }: 
   const totals = data?.totals ?? {
     total_count: 0,
     settled_volume_bdt: 0,
-    candidate_count: 0,
+    pending_count: 0,
+    detected_count: 0,
+    matched_count: 0,
     review_count: 0,
-    settled_count: 0,
+    success_count: 0,
+    failed_count: 0,
   };
   const deviceStats = data?.deviceStats ?? { active_devices: 0, total_devices: 0 };
   const webhookStats = data?.webhookStats ?? { delivered: 0, total: 0 };
+  const openFraud = Number(data?.openFraudAlerts ?? 0);
   const webhookRate =
     webhookStats.total > 0 ? Math.round((webhookStats.delivered / webhookStats.total) * 100) : 100;
 
   return (
     <div className="space-y-6">
-      {/* Compliance Notice Banner (Clean hairline, no border-l-4 cliché) */}
       <div className="bg-white border border-slate-200 rounded-xl p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div className="flex items-start gap-3">
           <ShieldCheck className="h-5 w-5 text-teal-700 shrink-0 mt-0.5" />
           <div>
             <p className="text-sm font-medium text-slate-900">
-              Two-Stage Verification Policy Active
+              {isMerchantView
+                ? 'Merchant Settlement & Verification Guardrail'
+                : 'Two-Stage Verification Policy Active (8-Status Lifecycle)'}
             </p>
             <p className="text-xs text-slate-600 mt-0.5">
-              Device notifications only flag candidate matches. Settlements require official Provider API confirmation or documented finance verification.
+              Incoming MFS, CellFin, Bangla QR, and Bank SMS alerts transition orders to MATCHED or REVIEW_REQUIRED. SUCCESS triggers only after official Provider API confirmation or documented finance verification.
             </p>
           </div>
         </div>
@@ -81,7 +97,7 @@ export function OverviewTab({ data, loading, onInspectPayment, onNavigateTab }: 
           onClick={() => onNavigateTab('payments')}
           className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-medium text-teal-800 bg-teal-50 hover:bg-teal-100 border border-teal-200 rounded-lg transition-colors whitespace-nowrap shrink-0"
         >
-          <span>Review Queue</span>
+          <span>{isMerchantView ? 'View Orders' : 'Review Queue'}</span>
           <ArrowRight className="h-3.5 w-3.5" />
         </button>
       </div>
@@ -94,24 +110,25 @@ export function OverviewTab({ data, loading, onInspectPayment, onNavigateTab }: 
             {formatBdt(totals.settled_volume_bdt)}
           </p>
           <p className="mt-1.5 text-xs text-slate-500">
-            <span className="font-mono tabular-nums">{totals.settled_count}</span> of{' '}
-            <span className="font-mono tabular-nums">{totals.total_count}</span> intents settled
+            <span className="font-mono tabular-nums">{totals.success_count}</span> SUCCESS of{' '}
+            <span className="font-mono tabular-nums">{totals.total_count}</span> sessions
           </p>
         </div>
 
         <div className="bg-white border border-slate-200 rounded-xl p-5">
-          <p className="text-xs font-medium text-slate-500">Awaiting Verification</p>
+          <p className="text-xs font-medium text-slate-500">Verification Pipeline</p>
           <p className="mt-2 text-2xl font-semibold font-mono tabular-nums text-amber-700">
-            {Number(totals.candidate_count) + Number(totals.review_count)}
+            {Number(totals.matched_count) + Number(totals.review_count) + Number(totals.detected_count)}
           </p>
           <p className="mt-1.5 text-xs text-slate-500">
-            <span className="font-mono tabular-nums">{totals.candidate_count}</span> candidate matched ·{' '}
-            <span className="font-mono tabular-nums">{totals.review_count}</span> manual review
+            <span className="font-mono tabular-nums">{totals.matched_count}</span> matched ·{' '}
+            <span className="font-mono tabular-nums">{totals.review_count}</span> review ·{' '}
+            <span className="font-mono tabular-nums">{totals.detected_count}</span> detected
           </p>
         </div>
 
         <div className="bg-white border border-slate-200 rounded-xl p-5">
-          <p className="text-xs font-medium text-slate-500">Paired Android Agents</p>
+          <p className="text-xs font-medium text-slate-500">Paired Android Listeners</p>
           <p className="mt-2 text-2xl font-semibold font-mono tabular-nums text-slate-900">
             {deviceStats.active_devices} / {deviceStats.total_devices}
           </p>
@@ -121,46 +138,65 @@ export function OverviewTab({ data, loading, onInspectPayment, onNavigateTab }: 
               onClick={() => onNavigateTab('devices')}
               className="text-teal-700 hover:underline font-medium"
             >
-              Manage device fleet
+              Manage SIM & notification nodes
             </button>
           </p>
         </div>
 
         <div className="bg-white border border-slate-200 rounded-xl p-5">
-          <p className="text-xs font-medium text-slate-500">Signed Webhook Delivery</p>
+          <div className="flex items-center justify-between">
+            <p className="text-xs font-medium text-slate-500">Webhooks & Fraud Guard</p>
+            {openFraud > 0 && <AlertTriangle className="h-4 w-4 text-rose-600" />}
+          </div>
           <p className="mt-2 text-2xl font-semibold font-mono tabular-nums text-slate-900">
-            {webhookRate}%
+            {webhookRate}%{' '}
+            <span className={`text-xs font-sans font-medium ${openFraud > 0 ? 'text-rose-700' : 'text-slate-500'}`}>
+              ({openFraud} open alerts)
+            </span>
           </p>
           <p className="mt-1.5 text-xs text-slate-500">
-            <span className="font-mono tabular-nums">{webhookStats.delivered}</span> delivered of{' '}
-            <span className="font-mono tabular-nums">{webhookStats.total}</span> dispatches
+            <span className="font-mono tabular-nums">{webhookStats.delivered}</span>/{webhookStats.total} webhooks ·{' '}
+            {!isMerchantView && (
+              <button
+                type="button"
+                onClick={() => onNavigateTab('fraud')}
+                className="text-teal-700 hover:underline font-medium"
+              >
+                Inspect alerts
+              </button>
+            )}
           </p>
         </div>
       </div>
 
-      {/* Provider Split */}
+      {/* 7-Provider Split */}
       <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
-        <div className="px-5 py-4 border-b border-slate-200 flex items-center justify-between">
-          <h2 className="text-sm font-semibold text-slate-900">Provider Breakdown</h2>
-          <span className="text-xs text-slate-500">bKash · Nagad · DBBL Rocket</span>
+        <div className="px-5 py-4 border-b border-slate-200 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+          <h2 className="text-sm font-semibold text-slate-900">Payment Channel Breakdown</h2>
+          <span className="text-xs text-slate-500">
+            bKash · Nagad · Rocket · Upay · CellFin · Bangla QR · Bank SMS
+          </span>
         </div>
-        <div className="grid grid-cols-1 md:grid-cols-3 divide-y md:divide-y-0 md:divide-x divide-slate-200">
-          {['BKASH', 'NAGAD', 'ROCKET'].map((prov) => {
-            const stat = data?.byProvider.find((p) => p.provider === prov);
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 divide-y sm:divide-y-0 sm:divide-x divide-slate-200">
+          {ALL_PROVIDERS.map((prov, idx) => {
+            const stat = data?.byProvider.find((p) => p.provider === prov.code);
             return (
-              <div key={prov} className="p-5 flex items-center justify-between">
+              <div
+                key={prov.code}
+                className={`p-4 flex items-center justify-between ${idx >= 4 ? 'border-t border-slate-200' : ''}`}
+              >
                 <div>
-                  <ProviderLabel provider={prov} />
-                  <p className="mt-2 text-lg font-semibold font-mono tabular-nums text-slate-900">
+                  <ProviderLabel provider={prov.code} />
+                  <p className="mt-2 text-base font-semibold font-mono tabular-nums text-slate-900">
                     {formatBdt(stat?.settled_bdt ?? 0)}
                   </p>
                   <p className="mt-0.5 text-xs text-slate-500">
-                    <span className="font-mono tabular-nums">{stat?.total_count ?? 0}</span> total intents
+                    <span className="font-mono tabular-nums">{stat?.total_count ?? 0}</span> intents
                   </p>
                 </div>
                 <div className="text-right">
-                  <p className="text-xs text-slate-500">Pending Review</p>
-                  <p className="mt-1 text-base font-semibold font-mono tabular-nums text-amber-700">
+                  <p className="text-xs text-slate-500">In Queue</p>
+                  <p className="mt-1 text-sm font-semibold font-mono tabular-nums text-amber-700">
                     {stat?.pending_verification_count ?? 0}
                   </p>
                 </div>
@@ -174,9 +210,9 @@ export function OverviewTab({ data, loading, onInspectPayment, onNavigateTab }: 
       <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
         <div className="px-5 py-4 border-b border-slate-200 flex items-center justify-between">
           <div>
-            <h2 className="text-sm font-semibold text-slate-900">Verification Queue</h2>
+            <h2 className="text-sm font-semibold text-slate-900">Active Verification Queue</h2>
             <p className="text-xs text-slate-500 mt-0.5">
-              Payments awaiting provider API confirmation or documented finance approval
+              DETECTED, MATCHED, and REVIEW_REQUIRED orders awaiting verification
             </p>
           </div>
           <button
@@ -184,7 +220,7 @@ export function OverviewTab({ data, loading, onInspectPayment, onNavigateTab }: 
             onClick={() => onNavigateTab('payments')}
             className="text-xs font-medium text-teal-700 hover:underline whitespace-nowrap"
           >
-            View All Intents
+            View All Orders
           </button>
         </div>
 
@@ -193,10 +229,10 @@ export function OverviewTab({ data, loading, onInspectPayment, onNavigateTab }: 
             <thead>
               <tr className="border-b border-slate-200 bg-slate-50/70 text-xs font-medium text-slate-500">
                 <th className="py-2.5 px-4">Order / Merchant</th>
-                <th className="py-2.5 px-4">Provider</th>
+                <th className="py-2.5 px-4">Method</th>
                 <th className="py-2.5 px-4 text-right">Amount</th>
-                <th className="py-2.5 px-4">Submitted TrxID</th>
-                <th className="py-2.5 px-4">Status</th>
+                <th className="py-2.5 px-4">TrxID / Ref</th>
+                <th className="py-2.5 px-4">Lifecycle Status</th>
                 <th className="py-2.5 px-4">Updated</th>
                 <th className="py-2.5 px-4 text-right">Action</th>
               </tr>
@@ -205,7 +241,7 @@ export function OverviewTab({ data, loading, onInspectPayment, onNavigateTab }: 
               {(data?.verificationQueue ?? []).length === 0 ? (
                 <tr>
                   <td colSpan={7} className="py-10 text-center text-xs text-slate-500">
-                    All candidate matches have been verified or settled.
+                    No unverified matches waiting in the queue.
                   </td>
                 </tr>
               ) : (
@@ -222,7 +258,7 @@ export function OverviewTab({ data, loading, onInspectPayment, onNavigateTab }: 
                       {formatBdt(p.amount_bdt)}
                     </td>
                     <td className="py-3 px-4 font-mono text-xs text-slate-700">
-                      {p.submitted_trx_id || '—'}
+                      {p.submitted_trx_id || p.reference_code}
                     </td>
                     <td className="py-3 px-4">
                       <PaymentStatusLabel status={p.status} />
@@ -246,7 +282,7 @@ export function OverviewTab({ data, loading, onInspectPayment, onNavigateTab }: 
                           onClick={() => onInspectPayment(p.id)}
                           className="px-3 py-1.5 text-xs font-medium text-teal-800 bg-teal-50 hover:bg-teal-100 border border-teal-200 rounded-md whitespace-nowrap"
                         >
-                          Inspect & Verify
+                          {isMerchantView ? 'Inspect' : 'Inspect & Verify'}
                         </button>
                       </div>
                     </td>
