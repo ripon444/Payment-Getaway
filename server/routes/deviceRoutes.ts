@@ -1,0 +1,289 @@
+import { Router } from 'express';
+import QRCode from 'qrcode';
+import { env } from '../config/env.ts';
+import { getDb, isoNow } from '../db/client.ts';
+import { requireAuth, requireDeviceAuth, requireRole } from '../middleware/auth.ts';
+import type { AuthedRequest } from '../middleware/auth.ts';
+import { recordAuditLog } from '../services/auditService.ts';
+import {
+  encryptSecret,
+  generatePairingCode,
+  generateSecretHex,
+  newId,
+  sha256Hex,
+} from '../utils/crypto.ts';
+
+export const deviceRoutes = Router();
+
+deviceRoutes.get('/', requireAuth, async (req: AuthedRequest, res) => {
+  const db = getDb();
+  const isScoped = req.user!.role === 'MERCHANT_ADMIN' && req.user!.merchantId;
+
+  const devices = await db.query<{
+    id: string;
+    merchant_id: string | null;
+    merchant_name: string | null;
+    device_uid: string | null;
+    device_name: string;
+    android_model: string | null;
+    android_version: string | null;
+    app_version: string | null;
+    pairing_code: string | null;
+    pairing_expires_at: string | null;
+    assigned_providers_json: string;
+    status: string;
+    last_heartbeat_at: string | null;
+    battery_pct: number | null;
+    network_type: string | null;
+    queue_depth: number;
+    created_at: string;
+  }>(
+    `SELECT d.id, d.merchant_id, m.name AS merchant_name, d.device_uid, d.device_name,
+            d.android_model, d.android_version, d.app_version, d.pairing_code, d.pairing_expires_at,
+            d.assigned_providers_json, d.status, d.last_heartbeat_at, d.battery_pct,
+            d.network_type, d.queue_depth, d.created_at
+     FROM devices d
+     LEFT JOIN merchants m ON m.id = d.merchant_id
+     ${isScoped ? 'WHERE d.merchant_id = ?' : ''}
+     ORDER BY d.created_at DESC`,
+    isScoped ? [req.user!.merchantId!] : [],
+  );
+
+  const mappings = await db.query<{ device_id: string; wallet_id: string; provider: string; account_number: string }>(
+    `SELECT dw.device_id, dw.wallet_id, w.provider, w.account_number
+     FROM device_wallets dw
+     JOIN mfs_wallets w ON w.id = dw.wallet_id`,
+  );
+
+  const enriched = devices.map((d) => ({
+    ...d,
+    assignedProviders: JSON.parse(d.assigned_providers_json || '[]'),
+    assignedWallets: mappings.filter((m) => m.device_id === d.id),
+  }));
+
+  res.json({ devices: enriched });
+});
+
+deviceRoutes.post(
+  '/pairing-code',
+  requireAuth,
+  requireRole('SUPER_ADMIN', 'OPERATIONS'),
+  async (req: AuthedRequest, res) => {
+    const deviceName = String(req.body?.deviceName ?? '').trim();
+    const merchantId = req.body?.merchantId ? String(req.body.merchantId) : null;
+    const assignedProviders = Array.isArray(req.body?.assignedProviders)
+      ? req.body.assignedProviders.map((p: unknown) => String(p).toUpperCase())
+      : ['BKASH', 'NAGAD', 'ROCKET'];
+    const walletIds = Array.isArray(req.body?.walletIds) ? req.body.walletIds.map(String) : [];
+
+    if (!deviceName) {
+      res.status(400).json({ error: 'deviceName is required' });
+      return;
+    }
+
+    const db = getDb();
+    const id = newId();
+    const pairingCode = generatePairingCode();
+    const expiresAt = isoNow(15 * 60_000);
+    const now = isoNow();
+
+    await db.execute(
+      `INSERT INTO devices (
+        id, merchant_id, device_name, pairing_code, pairing_expires_at,
+        assigned_providers_json, status, queue_depth, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, 'PENDING_PAIRING', 0, ?, ?)`,
+      [id, merchantId, deviceName, pairingCode, expiresAt, JSON.stringify(assignedProviders), now, now],
+    );
+
+    for (const walletId of walletIds) {
+      await db.execute(
+        'INSERT INTO device_wallets (device_id, wallet_id, assigned_at) VALUES (?, ?, ?)',
+        [id, walletId, now],
+      );
+    }
+
+    const qrPayload = JSON.stringify({
+      gatewayUrl: env.appUrl,
+      pairingCode,
+      deviceId: id,
+      deviceName,
+      providers: assignedProviders,
+    });
+    const qrDataUrl = await QRCode.toDataURL(qrPayload, { margin: 1, width: 240 });
+
+    await recordAuditLog({
+      actorType: 'USER',
+      actorId: req.user!.id,
+      actorEmail: req.user!.email,
+      action: 'DEVICE_PAIRING_INITIATED',
+      resourceType: 'device',
+      resourceId: id,
+      ipAddress: req.ip ?? null,
+      afterState: { deviceName, merchantId, assignedProviders, expiresAt },
+    });
+
+    res.status(201).json({
+      deviceId: id,
+      deviceName,
+      pairingCode,
+      expiresAt,
+      qrPayload,
+      qrDataUrl,
+    });
+  },
+);
+
+// Public Android Agent Pairing Handshake
+deviceRoutes.post('/pair', async (req, res) => {
+  const pairingCode = String(req.body?.pairingCode ?? '').trim().toUpperCase();
+  const deviceUid = String(req.body?.deviceUid ?? '').trim();
+  const androidModel = String(req.body?.androidModel ?? 'Android Device').trim();
+  const androidVersion = String(req.body?.androidVersion ?? 'Unknown').trim();
+  const appVersion = String(req.body?.appVersion ?? '1.0.0').trim();
+
+  if (!pairingCode || !deviceUid) {
+    res.status(400).json({ error: 'pairingCode and deviceUid are required' });
+    return;
+  }
+
+  const db = getDb();
+  const device = await db.queryOne<{
+    id: string;
+    merchant_id: string | null;
+    device_name: string;
+    pairing_expires_at: string | null;
+    assigned_providers_json: string;
+    status: string;
+  }>(
+    'SELECT id, merchant_id, device_name, pairing_expires_at, assigned_providers_json, status FROM devices WHERE pairing_code = ?',
+    [pairingCode],
+  );
+
+  if (!device || device.status !== 'PENDING_PAIRING') {
+    res.status(404).json({ error: 'Invalid or already consumed pairing code' });
+    return;
+  }
+
+  if (device.pairing_expires_at && new Date(device.pairing_expires_at.replace(' ', 'T') + 'Z') < new Date()) {
+    res.status(410).json({ error: 'Pairing code expired; request a new pairing code from Admin Dashboard' });
+    return;
+  }
+
+  const rawDeviceToken = `tldev_${generateSecretHex(24)}`;
+  const rawHmacSecret = generateSecretHex(32);
+  const now = isoNow();
+
+  await db.execute(
+    `UPDATE devices
+     SET device_uid = ?, android_model = ?, android_version = ?, app_version = ?,
+         pairing_code = NULL, pairing_expires_at = NULL,
+         device_token_hash = ?, hmac_secret_enc = ?,
+         status = 'ACTIVE', last_heartbeat_at = ?, updated_at = ?
+     WHERE id = ?`,
+    [
+      deviceUid,
+      androidModel,
+      androidVersion,
+      appVersion,
+      sha256Hex(rawDeviceToken),
+      encryptSecret(rawHmacSecret),
+      now,
+      now,
+      device.id,
+    ],
+  );
+
+  await recordAuditLog({
+    actorType: 'DEVICE',
+    actorId: device.id,
+    actorEmail: deviceUid,
+    action: 'DEVICE_PAIRED_ACTIVE',
+    resourceType: 'device',
+    resourceId: device.id,
+    ipAddress: req.ip ?? null,
+    afterState: { deviceUid, androidModel, androidVersion, appVersion },
+  });
+
+  res.json({
+    deviceId: device.id,
+    deviceName: device.device_name,
+    merchantId: device.merchant_id,
+    assignedProviders: JSON.parse(device.assigned_providers_json || '[]'),
+    deviceToken: rawDeviceToken,
+    hmacSecret: rawHmacSecret,
+    ingestEndpoint: '/api/notifications/ingest-batch',
+    heartbeatEndpoint: '/api/devices/heartbeat',
+  });
+});
+
+deviceRoutes.post('/heartbeat', requireDeviceAuth, async (req: AuthedRequest, res) => {
+  const batteryPct = req.body?.batteryPct !== undefined ? Number(req.body.batteryPct) : null;
+  const networkType = req.body?.networkType ? String(req.body.networkType) : null;
+  const queueDepth = req.body?.queueDepth !== undefined ? Number(req.body.queueDepth) : 0;
+
+  const db = getDb();
+  await db.execute(
+    `UPDATE devices
+     SET last_heartbeat_at = ?, battery_pct = COALESCE(?, battery_pct),
+         network_type = COALESCE(?, network_type), queue_depth = ?, updated_at = ?
+     WHERE id = ?`,
+    [isoNow(), batteryPct, networkType, queueDepth, isoNow(), req.device!.id],
+  );
+
+  res.json({ ok: true, serverTimeMs: Date.now(), status: req.device!.status });
+});
+
+deviceRoutes.patch(
+  '/:id',
+  requireAuth,
+  requireRole('SUPER_ADMIN', 'OPERATIONS'),
+  async (req: AuthedRequest, res) => {
+    const db = getDb();
+    const existing = await db.queryOne<{ id: string; status: string; device_name: string }>(
+      'SELECT id, status, device_name FROM devices WHERE id = ?',
+      [req.params.id],
+    );
+    if (!existing) {
+      res.status(404).json({ error: 'Device not found' });
+      return;
+    }
+
+    const nextStatus = req.body?.status ? String(req.body.status).toUpperCase() : existing.status;
+    if (!['PENDING_PAIRING', 'ACTIVE', 'SUSPENDED', 'REVOKED'].includes(nextStatus)) {
+      res.status(400).json({ error: 'Invalid device status' });
+      return;
+    }
+
+    const now = isoNow();
+    await db.execute('UPDATE devices SET status = ?, updated_at = ? WHERE id = ?', [
+      nextStatus,
+      now,
+      existing.id,
+    ]);
+
+    if (Array.isArray(req.body?.walletIds)) {
+      await db.execute('DELETE FROM device_wallets WHERE device_id = ?', [existing.id]);
+      for (const walletId of req.body.walletIds) {
+        await db.execute('INSERT INTO device_wallets (device_id, wallet_id, assigned_at) VALUES (?, ?, ?)', [
+          existing.id,
+          String(walletId),
+          now,
+        ]);
+      }
+    }
+
+    await recordAuditLog({
+      actorType: 'USER',
+      actorId: req.user!.id,
+      actorEmail: req.user!.email,
+      action: 'DEVICE_UPDATED',
+      resourceType: 'device',
+      resourceId: existing.id,
+      ipAddress: req.ip ?? null,
+      beforeState: { status: existing.status },
+      afterState: { status: nextStatus },
+    });
+
+    res.json({ id: existing.id, status: nextStatus });
+  },
+);
