@@ -17,8 +17,15 @@ function resolveSecret(envKey: string, bytes = 32): string {
   return crypto.randomBytes(bytes).toString('hex');
 }
 
+function resolvePort(): number | string {
+  const raw = process.env.PORT;
+  if (!raw) return 3000;
+  const num = Number(raw);
+  return Number.isFinite(num) && num > 0 ? num : raw;
+}
+
 export const env = {
-  port: Number(process.env.PORT || 3000),
+  port: resolvePort(),
   nodeEnv: process.env.NODE_ENV || 'development',
   isProduction,
   appUrl: process.env.APP_URL || `http://localhost:${process.env.PORT || 3000}`,

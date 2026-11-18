@@ -109,9 +109,16 @@ async function bootstrap() {
   const httpServer = http.createServer(app);
   initSocketServer(httpServer);
 
-  httpServer.listen(env.port, '0.0.0.0', () => {
-    console.info(`[TakaLedger Gateway] Listening on http://0.0.0.0:${env.port} (${getDb().dialect} + Socket.IO)`);
-  });
+  const onListening = () => {
+    const addr = typeof env.port === 'string' ? env.port : `http://0.0.0.0:${env.port}`;
+    console.info(`[TakaLedger Gateway] Listening on ${addr} (${getDb().dialect} + Socket.IO)`);
+  };
+
+  if (typeof env.port === 'string') {
+    httpServer.listen(env.port, onListening);
+  } else {
+    httpServer.listen(env.port, '0.0.0.0', onListening);
+  }
 }
 
 bootstrap().catch((err) => {
