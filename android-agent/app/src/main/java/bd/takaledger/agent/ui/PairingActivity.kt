@@ -1,7 +1,9 @@
 package bd.takaledger.agent.ui
 
 import android.Manifest
+import android.annotation.SuppressLint
 import android.content.ComponentName
+import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
@@ -9,23 +11,30 @@ import android.os.Build
 import android.os.Bundle
 import android.os.PowerManager
 import android.provider.Settings
+import android.telephony.SubscriptionManager
 import android.widget.Button
 import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
+import androidx.activity.result.ActivityResultLauncher
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import androidx.work.Constraints
 import androidx.work.ExistingPeriodicWorkPolicy
+import androidx.work.ExistingWorkPolicy
 import androidx.work.NetworkType
+import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
+import bd.takaledger.agent.BuildConfig
 import bd.takaledger.agent.crypto.DeviceCryptoStore
 import bd.takaledger.agent.data.OfflineQueueDatabase
 import bd.takaledger.agent.service.MfsNotificationListenerService
 import bd.takaledger.agent.worker.EventSyncWorker
+import com.journeyapps.barcodescanner.ScanContract
+import com.journeyapps.barcodescanner.ScanOptions
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -34,6 +43,7 @@ import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
+import org.json.JSONArray
 import org.json.JSONObject
 import java.util.concurrent.TimeUnit
 
@@ -42,34 +52,44 @@ class PairingActivity : AppCompatActivity() {
     private val client = OkHttpClient()
     private val scope = CoroutineScope(Dispatchers.Main)
 
+    private lateinit var store: DeviceCryptoStore
+    private lateinit var statusView: TextView
+    private lateinit var urlInput: EditText
+    private lateinit var codeInput: EditText
+
+    private val qrLauncher: ActivityResultLauncher<ScanOptions> =
+        registerForActivityResult(ScanContract()) { result ->
+            val raw = result.contents ?: return@registerForActivityResult
+            handleQrPayload(raw)
+        }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        val store = DeviceCryptoStore(this)
-        val statusView = TextView(this).apply {
-            text = if (store.isPaired()) {
-                "Status: PAIRED (${store.getDeviceId()})\nGateway: ${store.getGatewayUrl()}"
-            } else {
-                "Status: NOT PAIRED — Enter Gateway URL & Pairing Code from Admin/Merchant Dashboard"
-            }
+        store = DeviceCryptoStore(this)
+        statusView = TextView(this).apply {
             setPadding(0, 0, 0, 24)
         }
 
-        val rationaleView = TextView(this).apply {
-            text = "Permissions & Security Notice:\n" +
-                "• Notification Listener reads incoming payment alerts from bKash, Nagad, Rocket, Upay, CellFin, and Bank apps.\n" +
-                "• SMS Access (Optional) captures bank credit & Bangla QR SMS on dual-SIM phones.\n" +
-                "• OTP, PIN, and password messages are redacted locally and never uploaded.\n" +
-                "• Battery Optimization must be disabled for reliable offline-to-online background sync."
-            setPadding(0, 16, 0, 24)
-        }
-
-        val urlInput = EditText(this).apply {
-            hint = "https://pay.yourdomain.com"
+        urlInput = EditText(this).apply {
+            hint = "Gateway URL (e.g. https://pay.takaledger.bd)"
             setText(store.getGatewayUrl() ?: "")
         }
-        val codeInput = EditText(this).apply {
+        codeInput = EditText(this).apply {
             hint = "Pairing Code (e.g. ABCD-EFGH)"
+        }
+
+        val scanQrBtn = Button(this).apply {
+            text = "Scan Dashboard QR Code"
+            setOnClickListener {
+                val options = ScanOptions().apply {
+                    setDesiredBarcodeFormats(ScanOptions.QR_CODE)
+                    setPrompt("Scan TakaLedger Merchant Device QR Code")
+                    setBeepEnabled(false)
+                    setOrientationLocked(true)
+                }
+                qrLauncher.launch(options)
+            }
         }
 
         val pairBtn = Button(this).apply {
@@ -78,9 +98,38 @@ class PairingActivity : AppCompatActivity() {
                 val baseUrl = urlInput.text.toString().trim().trimEnd('/')
                 val code = codeInput.text.toString().trim().uppercase()
                 if (baseUrl.isNotEmpty() && code.isNotEmpty()) {
-                    performPairing(store, baseUrl, code, statusView)
+                    performPairing(baseUrl, code)
                 }
             }
+        }
+
+        val syncNowBtn = Button(this).apply {
+            text = "Sync Offline Queue & Heartbeat Now"
+            setOnClickListener {
+                val req = OneTimeWorkRequestBuilder<EventSyncWorker>().build()
+                WorkManager.getInstance(applicationContext)
+                    .enqueueUniqueWork("takaledger_manual_sync", ExistingWorkPolicy.REPLACE, req)
+                refreshDiagnostics()
+            }
+        }
+
+        val unpairBtn = Button(this).apply {
+            text = "Unpair / Reset Device Credentials"
+            setOnClickListener {
+                store.clearPairing()
+                urlInput.setText("")
+                codeInput.setText("")
+                refreshDiagnostics()
+            }
+        }
+
+        val rationaleView = TextView(this).apply {
+            text = "Security & Multi-Merchant Isolation:\n" +
+                "• Each Android phone binds to a single Merchant account via QR or one-time Pairing Code.\n" +
+                "• Reads incoming payment notifications & optional Bank/Bangla QR SMS (bKash, Nagad, Rocket, Upay, CellFin, Bank SMS).\n" +
+                "• OTP, PIN & password alerts are stripped locally before entering Room offline storage.\n" +
+                "• Signed with HMAC-SHA256 + Android Keystore AES-256-GCM."
+            setPadding(0, 16, 0, 24)
         }
 
         val notifPermBtn = Button(this).apply {
@@ -122,9 +171,12 @@ class PairingActivity : AppCompatActivity() {
             orientation = LinearLayout.VERTICAL
             setPadding(48, 64, 48, 48)
             addView(statusView)
+            addView(scanQrBtn)
             addView(urlInput)
             addView(codeInput)
             addView(pairBtn)
+            addView(syncNowBtn)
+            addView(unpairBtn)
             addView(rationaleView)
             addView(notifPermBtn)
             addView(smsPermBtn)
@@ -133,28 +185,70 @@ class PairingActivity : AppCompatActivity() {
 
         setContentView(ScrollView(this).apply { addView(layout) })
         schedulePeriodicSync()
-        refreshDiagnostics(statusView, store)
+        refreshDiagnostics()
     }
 
-    private fun performPairing(
-        store: DeviceCryptoStore,
-        gatewayUrl: String,
-        pairingCode: String,
-        statusView: TextView
-    ) {
+    override fun onResume() {
+        super.onResume()
+        refreshDiagnostics()
+    }
+
+    private fun handleQrPayload(raw: String) {
+        try {
+            val json = JSONObject(raw)
+            val gatewayUrl = json.optString("gatewayUrl").trim().trimEnd('/')
+            val pairingCode = json.optString("pairingCode").trim().uppercase()
+            if (gatewayUrl.isNotEmpty() && pairingCode.isNotEmpty()) {
+                urlInput.setText(gatewayUrl)
+                codeInput.setText(pairingCode)
+                performPairing(gatewayUrl, pairingCode)
+                return
+            }
+        } catch (_: Exception) {
+            // Fall back to URI parsing
+        }
+        statusView.text = "Scanned unrecognized QR content. Enter Gateway URL & Pairing Code manually."
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun collectSimSlots(): JSONArray {
+        val array = JSONArray()
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.READ_PHONE_STATE)
+            != PackageManager.PERMISSION_GRANTED
+        ) {
+            return array
+        }
+        runCatching {
+            val sm = getSystemService(Context.TELEPHONY_SUBSCRIPTION_SERVICE) as SubscriptionManager
+            sm.activeSubscriptionInfoList?.forEach { info ->
+                array.put(
+                    JSONObject().apply {
+                        put("slot", info.simSlotIndex + 1)
+                        put("carrier", info.carrierName?.toString() ?: "SIM ${info.simSlotIndex + 1}")
+                    }
+                )
+            }
+        }
+        return array
+    }
+
+    private fun performPairing(gatewayUrl: String, pairingCode: String) {
         scope.launch {
+            statusView.text = "Pairing device with $gatewayUrl..."
             val resultText = withContext(Dispatchers.IO) {
                 val androidId = Settings.Secure.getString(contentResolver, Settings.Secure.ANDROID_ID)
+                val simSlots = collectSimSlots()
                 val payload = JSONObject().apply {
                     put("pairingCode", pairingCode)
                     put("deviceUid", "AND-${androidId.take(10).uppercase()}")
                     put("androidModel", "${Build.MANUFACTURER} ${Build.MODEL}")
                     put("androidVersion", "Android ${Build.VERSION.RELEASE}")
-                    put("appVersion", "2.0.0")
+                    put("appVersion", BuildConfig.VERSION_NAME)
+                    put("simSlots", simSlots)
                 }.toString()
 
                 val req = Request.Builder()
-                    .url("$gatewayUrl/api/devices/pair")
+                    .url("$gatewayUrl/api/v1/devices/pair")
                     .post(payload.toRequestBody("application/json".toMediaType()))
                     .build()
 
@@ -165,13 +259,23 @@ class PairingActivity : AppCompatActivity() {
                             "Pairing failed (${res.code}): $body"
                         } else {
                             val json = JSONObject(body)
+                            val providersJson = json.optJSONArray("assignedProviders")
+                            val providers = mutableListOf<String>()
+                            if (providersJson != null) {
+                                for (i in 0 until providersJson.length()) {
+                                    providers.add(providersJson.getString(i))
+                                }
+                            }
                             store.savePairing(
                                 gatewayUrl = gatewayUrl,
                                 deviceId = json.getString("deviceId"),
                                 deviceToken = json.getString("deviceToken"),
-                                hmacSecret = json.getString("hmacSecret")
+                                hmacSecret = json.getString("hmacSecret"),
+                                merchantId = json.optString("merchantId").takeIf { it.isNotBlank() },
+                                deviceName = json.optString("deviceName").takeIf { it.isNotBlank() },
+                                assignedProviders = providers
                             )
-                            "Paired successfully as ${json.getString("deviceName")}"
+                            "Paired successfully as ${json.optString("deviceName", json.getString("deviceId"))}"
                         }
                     }
                 } catch (e: Exception) {
@@ -179,13 +283,15 @@ class PairingActivity : AppCompatActivity() {
                 }
             }
             statusView.text = resultText
+            refreshDiagnostics()
         }
     }
 
-    private fun refreshDiagnostics(statusView: TextView, store: DeviceCryptoStore) {
+    private fun refreshDiagnostics() {
         scope.launch {
-            val count = withContext(Dispatchers.IO) {
-                OfflineQueueDatabase.getInstance(applicationContext).dao().getPendingCount()
+            val (pendingCount, syncedCount) = withContext(Dispatchers.IO) {
+                val dao = OfflineQueueDatabase.getInstance(applicationContext).dao()
+                dao.getPendingCount() to dao.getSyncedCount()
             }
             val listenerEnabled = isListenerEnabled()
             val smsGranted = ContextCompat.checkSelfPermission(
@@ -195,11 +301,22 @@ class PairingActivity : AppCompatActivity() {
             val pm = getSystemService(POWER_SERVICE) as PowerManager
             val batteryExempt = pm.isIgnoringBatteryOptimizations(packageName)
 
-            statusView.append(
-                "\nListener Active: $listenerEnabled | SMS Granted: $smsGranted" +
-                    "\nBattery Unrestricted: $batteryExempt | Queued Offline Events: $count" +
-                    if (store.isPaired()) "\nCrypto: Android Keystore AES-256-GCM + HMAC-SHA256" else ""
-            )
+            val header = if (store.isPaired()) {
+                val notice = store.getDeviceStatusNotice()
+                val providers = store.getAssignedProviders().joinToString(", ").ifBlank { "ALL" }
+                "Status: PAIRED (${store.getDeviceName() ?: store.getDeviceId()})\n" +
+                    "Merchant Scope: ${store.getMerchantId() ?: "GLOBAL"}\n" +
+                    "Gateway: ${store.getGatewayUrl()}\n" +
+                    "Assigned Channels: $providers" +
+                    if (!notice.isNullOrBlank()) "\nALERT: $notice" else ""
+            } else {
+                "Status: NOT PAIRED — Scan QR Code or enter Pairing Code from Merchant Dashboard"
+            }
+
+            statusView.text = "$header\n" +
+                "App v${BuildConfig.VERSION_NAME} | Listener Active: $listenerEnabled | SMS Granted: $smsGranted\n" +
+                "Battery Unrestricted: $batteryExempt | Queued: $pendingCount | Synced: $syncedCount" +
+                if (store.isPaired()) "\nCrypto: Android Keystore AES-256-GCM + HMAC-SHA256" else ""
         }
     }
 

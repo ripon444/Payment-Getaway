@@ -37,15 +37,136 @@ export interface AuthUser {
   merchantId: string | null;
 }
 
+export interface SubscriptionPackage {
+  id: string;
+  code: string;
+  name: string;
+  tagline: string | null;
+  monthlyPriceBdt: number;
+  yearlyPriceBdt: number;
+  maxWebsites: number;
+  maxDevices: number;
+  monthlyTxLimit: number;
+  allowedProviders: ProviderCode[];
+  allowPersonalWallets: boolean;
+  allowAutoMatching: boolean;
+  allowWebhooks: boolean;
+  allowApiAccess: boolean;
+  historyRetentionDays: number;
+  supportLevel: string;
+  isActive: boolean;
+  sortOrder: number;
+}
+
+export interface MerchantEntitlements {
+  merchantId: string;
+  merchantStatus: string;
+  hasActiveSubscription: boolean;
+  subscriptionStatus: 'TRIAL' | 'ACTIVE' | 'EXPIRED' | 'CANCELLED' | 'NONE';
+  billingCycle: 'MONTHLY' | 'YEARLY' | null;
+  currentPeriodStart: string | null;
+  currentPeriodEnd: string | null;
+  daysRemaining: number;
+  packageCode: string;
+  packageName: string;
+  maxWebsites: number;
+  usedWebsites: number;
+  maxDevices: number;
+  usedDevices: number;
+  monthlyTxLimit: number;
+  usedTxCurrentPeriod: number;
+  allowedProviders: ProviderCode[];
+  allowPersonalWallets: boolean;
+  allowAutoMatching: boolean;
+  allowWebhooks: boolean;
+  allowApiAccess: boolean;
+  historyRetentionDays: number;
+  supportLevel: string;
+  reasonIfBlocked: string | null;
+}
+
+export interface SubscriptionInvoice {
+  id: string;
+  merchant_id: string;
+  merchant_name?: string;
+  subscription_id: string;
+  package_id: string;
+  package_name?: string;
+  package_code?: string;
+  invoice_number: string;
+  billing_cycle: 'MONTHLY' | 'YEARLY';
+  amount_bdt: number;
+  payment_method: string;
+  status: string;
+  paid_at: string | null;
+  created_at: string;
+}
+
+export interface AdminSubscriptionRow {
+  id: string;
+  merchant_id: string;
+  merchant_name: string;
+  contact_email: string;
+  merchant_status: string;
+  package_id: string;
+  package_code: string;
+  package_name: string;
+  billing_cycle: 'MONTHLY' | 'YEARLY';
+  status: 'TRIAL' | 'ACTIVE' | 'EXPIRED' | 'CANCELLED';
+  price_bdt: number;
+  current_period_start: string;
+  current_period_end: string;
+  tx_used_current_period: number;
+  monthly_tx_limit: number;
+  max_websites: number;
+  max_devices: number;
+  updated_at: string;
+}
+
+export interface AdminSubscriptionOverview {
+  subscriptions: AdminSubscriptionRow[];
+  invoices: SubscriptionInvoice[];
+  revenueStats: {
+    total_revenue_bdt: number;
+    paid_invoices: number;
+    active_subs: number;
+    trial_subs: number;
+    expired_subs: number;
+    mrr_bdt: number;
+  };
+}
+
+export interface ApkInfo {
+  appName: string;
+  latestVersion: string;
+  minAndroidSdk: number;
+  targetAndroidSdk: number;
+  packageId: string;
+  gatewayBaseUrl: string;
+  endpoints: {
+    pair: string;
+    ingest: string;
+    ingestBatch: string;
+    heartbeat: string;
+  };
+  supportedProviders: ProviderCode[];
+  securityFeatures: string[];
+  buildGuide: string;
+}
+
 export interface MerchantRow {
   id: string;
   name: string;
   slug: string;
   business_type: string;
   contact_email: string;
+  business_phone?: string | null;
+  business_address?: string | null;
   webhook_url: string | null;
   api_key_prefix: string;
+  test_api_key_prefix?: string | null;
   settlement_mode: string;
+  auto_verify_policy?: 'STRICT_API_ONLY' | 'DETERMINISTIC_PERSONAL_PROOF' | string;
   fee_percent: number;
   settled_balance_bdt: number;
   pending_balance_bdt: number;
@@ -53,6 +174,9 @@ export interface MerchantRow {
   active_wallets: number;
   active_websites: number;
   total_payments: number;
+  package_name?: string | null;
+  subscription_status?: string | null;
+  subscription_ends_at?: string | null;
   created_at: string;
 }
 
@@ -64,6 +188,12 @@ export interface MerchantWebsiteRow {
   domain: string;
   platform: 'CUSTOM' | 'WOOCOMMERCE' | 'SHOPIFY' | 'LARAVEL';
   callback_url: string | null;
+  success_url?: string | null;
+  cancel_url?: string | null;
+  verification_token?: string | null;
+  verification_status?: 'PENDING' | 'VERIFIED' | string;
+  verified_at?: string | null;
+  mode?: 'LIVE' | 'TEST';
   is_active: number;
   created_at: string;
 }
@@ -123,12 +253,19 @@ export interface PaymentIntentRow {
   merchant_order_id: string;
   provider: ProviderCode;
   account_mode?: string;
+  mode?: 'LIVE' | 'TEST';
   amount_bdt: number;
+  requested_amount_bdt?: number | null;
+  unique_paisa_offset?: number;
   currency: string;
   customer_name: string | null;
   customer_phone: string | null;
   customer_email: string | null;
   reference_code: string;
+  success_url?: string | null;
+  cancel_url?: string | null;
+  verification_method?: string | null;
+  auto_verified?: number;
   bangla_qr_string?: string | null;
   submitted_trx_id: string | null;
   submitted_sender_phone: string | null;

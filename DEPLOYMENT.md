@@ -3,7 +3,7 @@
 ## 1. Architecture Overview (Unchanged Core Design)
 
 - **Backend & Real-Time Engine**: Node.js 22+, Express, TypeScript (`server.ts` + `server/`), Socket.IO (`/socket.io` with tenant-isolated rooms `admin:global`, `merchant:<id>`, `checkout:<id>`), and React 19 + Tailwind CSS v4 (`src/`).
-- **Database**: Production MySQL 8.0+ (`database/schema.sql`, 16 tables + `database/migrations/001_add_parsed_transaction_time.sql`) with built-in Node 22 SQLite adapter (`./data/gateway.db`) when `MYSQL_HOST` is unset.
+- **Database**: Production MySQL 8.0+ (`database/schema.sql`, + `database/migrations/001_add_parsed_transaction_time.sql` + `database/migrations/002_saas_platform_upgrade.sql`) with built-in Node 22 SQLite adapter (`./data/gateway.db`) when `MYSQL_HOST` is unset.
 - **Modular Payment Parsers (`server/parsers/`)**:
   - `bkashParser.ts` (bKash Personal & Merchant)
   - `nagadParser.ts` (Nagad Personal & Merchant)
@@ -12,10 +12,10 @@
   - `cellfinParser.ts` (Islami Bank CellFin)
   - `banglaQrParser.ts` (Bangla QR / NPSB interoperable QR credits + EMVCo payload generator `server/utils/banglaQr.ts`)
   - `bankSmsParser.ts` (Extensible DB-backed Bank SMS regex template engine)
-- **Android Notification & SMS Agent (`android-agent/`)**: Kotlin project using read-only `NotificationListenerService` + dual-SIM `BroadcastReceiver` (`RECEIVE_SMS`), local OTP/PIN redaction, Room SQLite v2 offline queue, `WorkManager` (`NetworkType.CONNECTED` + exponential backoff), and Android Keystore `EncryptedSharedPreferences`.
+- **Android Notification & SMS Agent (`android-agent/`)**: Kotlin project (`v2.1.0`) using ZXing QR camera pairing, read-only `NotificationListenerService` + dual-SIM `BroadcastReceiver` (`RECEIVE_SMS`), local OTP/PIN redaction, Room SQLite offline queue (`OfflineQueueDatabase`), `WorkManager` (`NetworkType.CONNECTED` + exponential backoff), and Android Keystore `EncryptedSharedPreferences`.
 - **WooCommerce Plugin (`woocommerce-plugin/takaledger-gateway/`)**: WordPress/WooCommerce payment gateway plugin with `X-Gateway-Signature` HMAC verification.
 
-> **Critical Compliance Rule**: SMS and push notifications alone NEVER mark a payment `VERIFIED` or `SUCCESS`. They advance orders to `MATCHED` or `REVIEW_REQUIRED`. Final settlement (`SUCCESS`) requires official Provider API confirmation or Documented Manual Finance Verification (`SUPER_ADMIN` / `FINANCE_REVIEWER` + mandatory documentary evidence reference).
+> **Verification & Settlement Policy**: Zero-TrxID customer sessions advance to `MATCHED` upon incoming Android SMS/app notification correlation. Depending on the merchant's `auto_verify_policy`, high-confidence deterministic personal/merchant proof (or configured Official Provider API) settles `MATCHED -> SUCCESS` automatically and dispatches signed webhooks; ambiguous or mismatched events remain in `REVIEW_REQUIRED` for finance approval.
 
 ---
 
@@ -56,8 +56,9 @@
    # Fresh installation:
    mysql -u root -p takaledger_gateway < database/schema.sql
 
-   # Upgrading an existing MySQL 8 database (idempotent):
+   # Upgrading an existing MySQL 8 database:
    mysql -u root -p takaledger_gateway < database/migrations/001_add_parsed_transaction_time.sql
+   mysql -u root -p takaledger_gateway < database/migrations/002_saas_platform_upgrade.sql
    ```
 3. Enable daily automated backups with integrity verification & 14-day retention:
    ```bash

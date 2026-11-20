@@ -20,8 +20,8 @@ android {
         applicationId = "bd.takaledger.agent"
         minSdk = 26
         targetSdk = 34
-        versionCode = 200
-        versionName = "2.0.0"
+        versionCode = 210
+        versionName = "2.1.0"
     }
 
     signingConfigs {
@@ -95,4 +95,7 @@ dependencies {
 
     // OkHttp + JSON
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
+
+    // Offline Camera QR Scanner for dashboard device pairing
+    implementation("com.journeyapps:zxing-android-embedded:4.3.0")
 }

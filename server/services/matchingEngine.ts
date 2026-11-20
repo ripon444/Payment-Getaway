@@ -1,3 +1,4 @@
+import { env } from '../config/env.ts';
 import { getDb, isoNow } from '../db/client.ts';
 import { parseMfsNotification, registerDynamicBankTemplates } from '../parsers/index.ts';
 import type { DynamicBankTemplate } from '../parsers/bankSmsParser.ts';
@@ -5,6 +6,8 @@ import type { RawNotificationInput } from '../parsers/index.ts';
 import { emitFraudAlert, emitNotificationIngested, emitPaymentUpdated } from '../realtime/socket.ts';
 import { newId, sha256Hex } from '../utils/crypto.ts';
 import { recordAuditLog } from './auditService.ts';
+import { getMerchantEntitlements } from './entitlementService.ts';
+import { autoVerifyWithDeterministicProof, verifyPaymentViaProviderApi } from './verificationService.ts';
 import { dispatchMerchantWebhook } from './webhookService.ts';
 
 export interface IngestNotificationRequest extends RawNotificationInput {
@@ -39,7 +42,10 @@ interface OpenIntentRow {
   wallet_number: string | null;
   merchant_order_id: string;
   provider: string;
+  account_mode: string;
+  mode: string;
   amount_bdt: number;
+  unique_paisa_offset: number;
   customer_phone: string | null;
   reference_code: string;
   submitted_trx_id: string | null;
@@ -47,6 +53,26 @@ interface OpenIntentRow {
   status: string;
   expires_at: string;
   created_at: string;
+}
+
+function hasOfficialProviderApiConfigured(provider: string): boolean {
+  if (provider === 'BKASH') {
+    return Boolean(
+      env.providers.bkashAppKey &&
+        env.providers.bkashAppSecret &&
+        env.providers.bkashUsername &&
+        env.providers.bkashPassword,
+    );
+  }
+  if (provider === 'NAGAD') {
+    return Boolean(env.providers.nagadMerchantId && env.providers.nagadMerchantPrivateKey);
+  }
+  if (provider === 'ROCKET') {
+    return Boolean(
+      env.providers.rocketBaseUrl && env.providers.rocketMerchantId && env.providers.rocketApiSecret,
+    );
+  }
+  return false;
 }
 
 async function createFraudAlert(params: {
@@ -351,13 +377,14 @@ export async function ingestDeviceNotification(req: IngestNotificationRequest): 
   const placeholders = candidateProviders.map(() => '?').join(', ');
   const openIntents = await db.query<OpenIntentRow>(
     `SELECT p.id, p.merchant_id, p.wallet_id, w.account_number AS wallet_number,
-            p.merchant_order_id, p.provider, p.amount_bdt,
-            p.customer_phone, p.reference_code, p.submitted_trx_id,
+            p.merchant_order_id, p.provider, p.account_mode, p.mode, p.amount_bdt,
+            p.unique_paisa_offset, p.customer_phone, p.reference_code, p.submitted_trx_id,
             p.submitted_sender_phone, p.status, p.expires_at, p.created_at
      FROM payment_intents p
      LEFT JOIN mfs_wallets w ON w.id = p.wallet_id
      WHERE p.provider IN (${placeholders})
        AND p.status IN ('PENDING', 'DETECTED', 'REVIEW_REQUIRED')
+       AND p.mode = 'LIVE'
        ${req.merchantId ? 'AND p.merchant_id = ?' : ''}
      ORDER BY p.created_at DESC
      LIMIT 120`,
@@ -370,7 +397,7 @@ export async function ingestDeviceNotification(req: IngestNotificationRequest): 
     let score = 0;
     const reasons: string[] = [];
 
-    // Check expiry window
+    // Check expiry window (allow 2m clock skew before created_at and 10m grace after expires_at)
     const expTime = new Date(intent.expires_at.replace(' ', 'T') + 'Z').getTime();
     if (Number.isFinite(expTime) && req.deviceTimestampMs > expTime + 10 * 60_000) {
       continue;
@@ -387,11 +414,11 @@ export async function ingestDeviceNotification(req: IngestNotificationRequest): 
 
     // Device-to-Wallet assignment match
     if (intent.wallet_id && walletIds.has(intent.wallet_id)) {
-      score += 10;
+      score += 15;
       reasons.push('DEVICE_WALLET_ASSIGNED');
     }
 
-    // Receiver account suffix match (for masked bank accounts like ***8841)
+    // Receiver account suffix match (for masked bank accounts like ***8841 or full wallet match)
     if (parsed.receiverAccount && intent.wallet_number) {
       const parsedDigits = parsed.receiverAccount.replace(/[^\d]/g, '');
       const walletDigits = intent.wallet_number.replace(/[^\d]/g, '');
@@ -401,7 +428,7 @@ export async function ingestDeviceNotification(req: IngestNotificationRequest): 
       }
     }
 
-    // Customer-submitted TrxID match
+    // Customer-submitted TrxID match (optional legacy path; zero-TrxID skips this)
     if (intent.submitted_trx_id && parsed.trxId) {
       if (intent.submitted_trx_id.toUpperCase() === parsed.trxId.toUpperCase()) {
         score += 35;
@@ -411,11 +438,15 @@ export async function ingestDeviceNotification(req: IngestNotificationRequest): 
       }
     }
 
-    // Amount check
+    // Amount check (Zero-TrxID relies heavily on exact paisa match)
     const diff = Math.abs(Number(intent.amount_bdt) - parsed.amountBdt);
     if (diff < 0.01) {
-      score += 30;
+      score += 35;
       reasons.push('AMOUNT_EXACT');
+      if (Number(intent.unique_paisa_offset || 0) > 0) {
+        score += 15;
+        reasons.push('MICRO_AMOUNT_PAISA_MATCH');
+      }
     } else if (diff <= 50 && intent.submitted_trx_id?.toUpperCase() === parsed.trxId?.toUpperCase()) {
       score -= 10;
       reasons.push(`AMOUNT_MISMATCH_DIFF_${diff.toFixed(2)}`);
@@ -426,13 +457,13 @@ export async function ingestDeviceNotification(req: IngestNotificationRequest): 
     // Sender phone match
     const expectedPhone = intent.submitted_sender_phone || intent.customer_phone;
     if (expectedPhone && parsed.senderPhone && expectedPhone.slice(-8) === parsed.senderPhone.slice(-8)) {
-      score += 10;
+      score += 15;
       reasons.push('SENDER_PHONE_MATCH');
     }
 
     // Reference code match
     if (parsed.reference && intent.reference_code.toUpperCase() === parsed.reference.toUpperCase()) {
-      score += 10;
+      score += 15;
       reasons.push('REFERENCE_MATCH');
     }
 
@@ -486,7 +517,7 @@ export async function ingestDeviceNotification(req: IngestNotificationRequest): 
     });
   }
 
-  // COMPLIANCE INVARIANT: Never set VERIFIED or SUCCESS from notification/SMS alone.
+  // COMPLIANCE INVARIANT: Never blindly set SUCCESS from an unverified/ambiguous SMS alone.
   const nextStatus =
     !hasAmbiguousTie && !hasAmountMismatch && top.score >= 70
       ? 'MATCHED'
@@ -527,7 +558,6 @@ export async function ingestDeviceNotification(req: IngestNotificationRequest): 
       confidenceScore: top.score,
       reasons: top.reasons,
       notificationEventId: eventId,
-      complianceNote: 'Notification match does not settle order; authorized verification required for SUCCESS.',
     },
   });
 
@@ -550,6 +580,64 @@ export async function ingestDeviceNotification(req: IngestNotificationRequest): 
     },
   });
 
+  // Zero-TrxID Auto-Settlement Gate (Official API OR Multi-Factor Deterministic Proof)
+  let finalStatusAfter = nextStatus;
+  let finalNote =
+    nextStatus === 'MATCHED'
+      ? 'Notification matched to payment session (MATCHED). Awaiting authorized provider or finance verification for SUCCESS.'
+      : 'Ambiguous or mismatched alert routed to REVIEW_REQUIRED.';
+
+  if (nextStatus === 'MATCHED' && parsed.trxId && parsed.trxId.length >= 6) {
+    const merchantRow = await db.queryOne<{ auto_verify_policy: string | null }>(
+      'SELECT auto_verify_policy FROM merchants WHERE id = ?',
+      [top.intent.merchant_id],
+    );
+    const entitlements = await getMerchantEntitlements(top.intent.merchant_id);
+    const allowAuto = !entitlements.package || entitlements.package.allowAutoMatching;
+
+    if (
+      top.intent.account_mode === 'MERCHANT' &&
+      hasOfficialProviderApiConfigured(top.intent.provider)
+    ) {
+      try {
+        await verifyPaymentViaProviderApi({
+          paymentId: top.intent.id,
+          actorId: req.deviceId,
+          actorEmail: 'auto-provider-api@takaledger.bd',
+          providerTrxId: parsed.trxId,
+          ipAddress: req.ipAddress ?? null,
+        });
+        finalStatusAfter = 'SUCCESS';
+        finalNote = 'Matched and auto-verified via Official Provider API (MATCHED -> SUCCESS).';
+      } catch {
+        // Keep at MATCHED if live API verification is unavailable or fails
+      }
+    } else if (
+      allowAuto &&
+      merchantRow?.auto_verify_policy !== 'STRICT_API_ONLY' &&
+      top.reasons.includes('AMOUNT_EXACT') &&
+      top.reasons.includes('PROVIDER_EXACT') &&
+      (top.reasons.includes('DEVICE_WALLET_ASSIGNED') ||
+        top.reasons.includes('RECEIVER_ACCOUNT_SUFFIX_MATCH'))
+    ) {
+      const autoRes = await autoVerifyWithDeterministicProof({
+        paymentId: top.intent.id,
+        deviceId: req.deviceId,
+        notificationEventId: eventId,
+        providerTrxId: parsed.trxId,
+        verifiedAmountBdt: parsed.amountBdt,
+        confidenceScore: top.score,
+        reasons: top.reasons,
+        ipAddress: req.ipAddress ?? null,
+      });
+      if (autoRes.verified) {
+        finalStatusAfter = 'SUCCESS';
+        finalNote =
+          'Zero-TrxID multi-factor deterministic proof passed (HMAC device + exact amount + receiver wallet + unique TrxID). Auto-settled to SUCCESS.';
+      }
+    }
+  }
+
   return {
     eventId,
     parseStatus: 'PARSED',
@@ -561,11 +649,120 @@ export async function ingestDeviceNotification(req: IngestNotificationRequest): 
     parsedTransactionTime: parsed.transactionTime,
     duplicate: false,
     candidatePaymentId: top.intent.id,
-    paymentStatusAfter: nextStatus,
+    paymentStatusAfter: finalStatusAfter,
     confidenceScore: top.score,
-    note:
-      nextStatus === 'MATCHED'
-        ? 'Notification matched to payment session (MATCHED). Awaiting authorized provider or finance verification for SUCCESS.'
-        : 'Ambiguous or mismatched alert routed to REVIEW_REQUIRED.',
+    note: finalNote,
   };
 }
+
+export async function reconcilePreArrivedNotificationForIntent(paymentIntentId: string): Promise<{
+  matched: boolean;
+  status: string;
+}> {
+  const db = getDb();
+  const intent = await db.queryOne<OpenIntentRow>(
+    `SELECT p.id, p.merchant_id, p.wallet_id, w.account_number AS wallet_number,
+            p.merchant_order_id, p.provider, p.account_mode, p.mode, p.amount_bdt,
+            p.unique_paisa_offset, p.customer_phone, p.reference_code, p.submitted_trx_id,
+            p.submitted_sender_phone, p.status, p.expires_at, p.created_at
+     FROM payment_intents p
+     LEFT JOIN mfs_wallets w ON w.id = p.wallet_id
+     WHERE p.id = ?`,
+    [paymentIntentId],
+  );
+  if (!intent || !['PENDING', 'DETECTED'].includes(intent.status) || intent.mode === 'TEST') {
+    return { matched: false, status: intent?.status ?? 'UNKNOWN' };
+  }
+
+  // Look for an unlinked PARSED notification for this merchant matching exact amount & provider
+  const unlinked = await db.queryOne<{
+    id: string;
+    device_id: string;
+    parsed_amount_bdt: number;
+    parsed_trx_id: string | null;
+    parsed_sender_phone: string | null;
+    parsed_receiver_account: string | null;
+    device_timestamp_ms: number;
+  }>(
+    `SELECT id, device_id, parsed_amount_bdt, parsed_trx_id, parsed_sender_phone,
+            parsed_receiver_account, device_timestamp_ms
+     FROM notification_events
+     WHERE merchant_id = ? AND provider = ? AND parse_status = 'PARSED'
+       AND candidate_payment_id IS NULL
+       AND ABS(parsed_amount_bdt - ?) < 0.01
+     ORDER BY received_at DESC
+     LIMIT 1`,
+    [intent.merchant_id, intent.provider, intent.amount_bdt],
+  );
+
+  if (!unlinked || !unlinked.parsed_trx_id) {
+    return { matched: false, status: intent.status };
+  }
+
+  // Check if device is bound to the wallet
+  const walletBound = intent.wallet_id
+    ? await db.queryOne<{ wallet_id: string }>(
+        'SELECT wallet_id FROM device_wallets WHERE device_id = ? AND wallet_id = ?',
+        [unlinked.device_id, intent.wallet_id],
+      )
+    : null;
+
+  const reasons = ['PROVIDER_EXACT', 'AMOUNT_EXACT'];
+  let score = 55;
+  if (walletBound) {
+    score += 15;
+    reasons.push('DEVICE_WALLET_ASSIGNED');
+  }
+  if (Number(intent.unique_paisa_offset || 0) > 0) {
+    score += 15;
+    reasons.push('MICRO_AMOUNT_PAISA_MATCH');
+  }
+  const expectedPhone = intent.submitted_sender_phone || intent.customer_phone;
+  if (expectedPhone && unlinked.parsed_sender_phone && expectedPhone.slice(-8) === unlinked.parsed_sender_phone.slice(-8)) {
+    score += 15;
+    reasons.push('SENDER_PHONE_MATCH');
+  }
+
+  if (score < 70) {
+    return { matched: false, status: intent.status };
+  }
+
+  const now = isoNow();
+  await db.execute(
+    `INSERT OR IGNORE INTO payment_match_candidates (id, payment_intent_id, notification_event_id, confidence_score, match_reasons_json, status, created_at)
+     VALUES (?, ?, ?, ?, ?, 'PROPOSED', ?)`,
+    [newId(), intent.id, unlinked.id, Math.min(100, score), JSON.stringify(reasons), now],
+  ).catch(async () => {
+    // MySQL fallback if INSERT OR IGNORE is rejected
+    await db.execute(
+      `INSERT IGNORE INTO payment_match_candidates (id, payment_intent_id, notification_event_id, confidence_score, match_reasons_json, status, created_at)
+       VALUES (?, ?, ?, ?, ?, 'PROPOSED', ?)`,
+      [newId(), intent.id, unlinked.id, Math.min(100, score), JSON.stringify(reasons), now],
+    );
+  });
+
+  await db.execute(
+    `UPDATE payment_intents
+     SET status = 'MATCHED', match_confidence = ?, matched_notification_id = ?,
+         matched_at = ?, updated_at = ?
+     WHERE id = ?`,
+    [Math.min(100, score), unlinked.id, now, now, intent.id],
+  );
+  await db.execute('UPDATE notification_events SET candidate_payment_id = ? WHERE id = ?', [
+    intent.id,
+    unlinked.id,
+  ]);
+
+  const autoRes = await autoVerifyWithDeterministicProof({
+    paymentId: intent.id,
+    deviceId: unlinked.device_id,
+    notificationEventId: unlinked.id,
+    providerTrxId: unlinked.parsed_trx_id,
+    verifiedAmountBdt: Number(unlinked.parsed_amount_bdt),
+    confidenceScore: Math.min(100, score),
+    reasons,
+  });
+
+  return { matched: true, status: autoRes.verified ? 'SUCCESS' : 'MATCHED' };
+}
+

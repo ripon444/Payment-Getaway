@@ -6,6 +6,7 @@ import { requireAuth, requireDeviceAuth, requireRole } from '../middleware/auth.
 import type { AuthedRequest } from '../middleware/auth.ts';
 import { emitDeviceTelemetry } from '../realtime/socket.ts';
 import { recordAuditLog } from '../services/auditService.ts';
+import { assertDeviceQuota, EntitlementError } from '../services/entitlementService.ts';
 import {
   encryptSecret,
   generatePairingCode,
@@ -87,6 +88,18 @@ deviceRoutes.post(
     if (!deviceName) {
       res.status(400).json({ error: 'deviceName is required' });
       return;
+    }
+
+    if (merchantId) {
+      try {
+        await assertDeviceQuota(merchantId);
+      } catch (err) {
+        if (err instanceof EntitlementError) {
+          res.status(err.statusCode).json({ error: err.message, code: err.code });
+          return;
+        }
+        throw err;
+      }
     }
 
     const db = getDb();
@@ -238,6 +251,7 @@ deviceRoutes.post('/pair', async (req, res) => {
 deviceRoutes.post('/heartbeat', requireDeviceAuth, async (req: AuthedRequest, res) => {
   const batteryPct = req.body?.batteryPct !== undefined ? Number(req.body.batteryPct) : null;
   const networkType = req.body?.networkType ? String(req.body.networkType) : null;
+  const appVersion = req.body?.appVersion ? String(req.body.appVersion) : null;
   const queueDepth = req.body?.queueDepth !== undefined ? Number(req.body.queueDepth) : 0;
   const simSlots = Array.isArray(req.body?.simSlots) ? JSON.stringify(req.body.simSlots) : null;
 
@@ -245,10 +259,10 @@ deviceRoutes.post('/heartbeat', requireDeviceAuth, async (req: AuthedRequest, re
   await db.execute(
     `UPDATE devices
      SET last_heartbeat_at = ?, battery_pct = COALESCE(?, battery_pct),
-         network_type = COALESCE(?, network_type), queue_depth = ?,
-         sim_slots_json = COALESCE(?, sim_slots_json), updated_at = ?
+         network_type = COALESCE(?, network_type), app_version = COALESCE(?, app_version),
+         queue_depth = ?, sim_slots_json = COALESCE(?, sim_slots_json), updated_at = ?
      WHERE id = ?`,
-    [isoNow(), batteryPct, networkType, queueDepth, simSlots, isoNow(), req.device!.id],
+    [isoNow(), batteryPct, networkType, appVersion, queueDepth, simSlots, isoNow(), req.device!.id],
   );
 
   emitDeviceTelemetry({
@@ -321,3 +335,58 @@ deviceRoutes.patch(
     res.json({ id: existing.id, status: nextStatus });
   },
 );
+
+deviceRoutes.post(
+  '/:id/unpair',
+  requireAuth,
+  requireRole('SUPER_ADMIN', 'OPERATIONS', 'MERCHANT_ADMIN'),
+  async (req: AuthedRequest, res) => {
+    const db = getDb();
+    const existing = await db.queryOne<{ id: string; merchant_id: string | null; status: string }>(
+      'SELECT id, merchant_id, status FROM devices WHERE id = ?',
+      [req.params.id],
+    );
+    if (!existing) {
+      res.status(404).json({ error: 'Device not found' });
+      return;
+    }
+    if (req.user!.role === 'MERCHANT_ADMIN' && existing.merchant_id !== req.user!.merchantId) {
+      res.status(403).json({ error: 'Forbidden' });
+      return;
+    }
+
+    const reason = req.body?.reason ? String(req.body.reason).trim() : 'Unpaired by account operator';
+    const now = isoNow();
+    await db.execute(
+      `UPDATE devices
+       SET status = 'REVOKED', device_token_hash = NULL, hmac_secret_enc = NULL,
+           unpaired_at = ?, revoked_reason = ?, updated_at = ?
+       WHERE id = ?`,
+      [now, reason, now, existing.id],
+    );
+
+    emitDeviceTelemetry({
+      deviceId: existing.id,
+      merchantId: existing.merchant_id,
+      status: 'REVOKED',
+      batteryPct: null,
+      networkType: null,
+      queueDepth: 0,
+    });
+
+    await recordAuditLog({
+      actorType: 'USER',
+      actorId: req.user!.id,
+      actorEmail: req.user!.email,
+      action: 'DEVICE_UNPAIRED_REVOKED',
+      resourceType: 'device',
+      resourceId: existing.id,
+      ipAddress: req.ip ?? null,
+      beforeState: { status: existing.status },
+      afterState: { status: 'REVOKED', reason },
+    });
+
+    res.json({ id: existing.id, status: 'REVOKED', unpairedAt: now, reason });
+  },
+);
+

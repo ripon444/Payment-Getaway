@@ -266,11 +266,61 @@ const SQLITE_SCHEMA_STATEMENTS = [
     after_state_json TEXT NULL,
     created_at TEXT NOT NULL
   )`,
+  `CREATE TABLE IF NOT EXISTS subscription_packages (
+    id TEXT PRIMARY KEY,
+    code TEXT NOT NULL UNIQUE,
+    name TEXT NOT NULL,
+    tagline TEXT NULL,
+    monthly_price_bdt REAL NOT NULL,
+    yearly_price_bdt REAL NOT NULL,
+    max_websites INTEGER NOT NULL DEFAULT 1,
+    max_devices INTEGER NOT NULL DEFAULT 1,
+    monthly_tx_limit INTEGER NOT NULL DEFAULT 500,
+    allowed_providers_json TEXT NOT NULL,
+    allow_personal_wallets INTEGER NOT NULL DEFAULT 1,
+    allow_auto_matching INTEGER NOT NULL DEFAULT 1,
+    allow_webhooks INTEGER NOT NULL DEFAULT 1,
+    allow_api_access INTEGER NOT NULL DEFAULT 1,
+    history_retention_days INTEGER NOT NULL DEFAULT 90,
+    support_level TEXT NOT NULL DEFAULT 'STANDARD',
+    is_active INTEGER NOT NULL DEFAULT 1,
+    sort_order INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  )`,
+  `CREATE TABLE IF NOT EXISTS merchant_subscriptions (
+    id TEXT PRIMARY KEY,
+    merchant_id TEXT NOT NULL REFERENCES merchants(id) ON DELETE CASCADE,
+    package_id TEXT NOT NULL REFERENCES subscription_packages(id) ON DELETE RESTRICT,
+    billing_cycle TEXT NOT NULL DEFAULT 'MONTHLY',
+    status TEXT NOT NULL DEFAULT 'TRIAL',
+    price_bdt REAL NOT NULL DEFAULT 0.00,
+    current_period_start TEXT NOT NULL,
+    current_period_end TEXT NOT NULL,
+    tx_used_current_period INTEGER NOT NULL DEFAULT 0,
+    auto_renew INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  )`,
+  `CREATE TABLE IF NOT EXISTS subscription_invoices (
+    id TEXT PRIMARY KEY,
+    merchant_id TEXT NOT NULL REFERENCES merchants(id) ON DELETE CASCADE,
+    subscription_id TEXT NOT NULL REFERENCES merchant_subscriptions(id) ON DELETE CASCADE,
+    package_id TEXT NOT NULL REFERENCES subscription_packages(id) ON DELETE RESTRICT,
+    invoice_number TEXT NOT NULL UNIQUE,
+    billing_cycle TEXT NOT NULL DEFAULT 'MONTHLY',
+    amount_bdt REAL NOT NULL,
+    payment_method TEXT NOT NULL DEFAULT 'BKASH',
+    status TEXT NOT NULL DEFAULT 'PAID',
+    paid_at TEXT NULL,
+    created_at TEXT NOT NULL
+  )`,
   `CREATE INDEX IF NOT EXISTS idx_pi_status ON payment_intents(status)`,
   `CREATE INDEX IF NOT EXISTS idx_pi_provider_amount ON payment_intents(provider, amount_bdt, status)`,
   `CREATE INDEX IF NOT EXISTS idx_pi_submitted_trx ON payment_intents(submitted_trx_id)`,
   `CREATE INDEX IF NOT EXISTS idx_ne_trx ON notification_events(provider, parsed_trx_id)`,
   `CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_logs(created_at)`,
+  `CREATE INDEX IF NOT EXISTS idx_ms_merchant_status ON merchant_subscriptions(merchant_id, status)`,
 ];
 
 const SAFE_SQLITE_MIGRATIONS = [
@@ -296,6 +346,30 @@ const SAFE_SQLITE_MIGRATIONS = [
   "ALTER TABLE notification_events ADD COLUMN parsed_bank_name TEXT NULL",
   "ALTER TABLE notification_events ADD COLUMN parsed_transaction_time TEXT NULL",
   "ALTER TABLE notification_events ADD COLUMN parser_module TEXT NULL",
+  // SaaS platform v2 additive columns
+  "ALTER TABLE merchants ADD COLUMN business_phone TEXT NULL",
+  "ALTER TABLE merchants ADD COLUMN business_address TEXT NULL",
+  "ALTER TABLE merchants ADD COLUMN api_secret_enc TEXT NULL",
+  "ALTER TABLE merchants ADD COLUMN test_api_key_prefix TEXT NULL",
+  "ALTER TABLE merchants ADD COLUMN test_api_key_hash TEXT NULL",
+  "ALTER TABLE merchants ADD COLUMN auto_verify_policy TEXT NOT NULL DEFAULT 'DETERMINISTIC_PERSONAL_PROOF'",
+  "CREATE UNIQUE INDEX IF NOT EXISTS idx_merchants_test_key ON merchants(test_api_key_hash)",
+  "ALTER TABLE merchant_websites ADD COLUMN verification_token TEXT NULL",
+  "ALTER TABLE merchant_websites ADD COLUMN verified_at TEXT NULL",
+  "ALTER TABLE merchant_websites ADD COLUMN verification_status TEXT NOT NULL DEFAULT 'PENDING'",
+  "ALTER TABLE merchant_websites ADD COLUMN success_url TEXT NULL",
+  "ALTER TABLE merchant_websites ADD COLUMN cancel_url TEXT NULL",
+  "ALTER TABLE merchant_websites ADD COLUMN enabled_providers_json TEXT NULL",
+  "ALTER TABLE merchant_websites ADD COLUMN mode TEXT NOT NULL DEFAULT 'LIVE'",
+  "ALTER TABLE payment_intents ADD COLUMN mode TEXT NOT NULL DEFAULT 'LIVE'",
+  "ALTER TABLE payment_intents ADD COLUMN requested_amount_bdt REAL NULL",
+  "ALTER TABLE payment_intents ADD COLUMN unique_paisa_offset REAL NOT NULL DEFAULT 0.00",
+  "ALTER TABLE payment_intents ADD COLUMN success_url TEXT NULL",
+  "ALTER TABLE payment_intents ADD COLUMN cancel_url TEXT NULL",
+  "ALTER TABLE payment_intents ADD COLUMN verification_method TEXT NULL",
+  "ALTER TABLE payment_intents ADD COLUMN auto_verified INTEGER NOT NULL DEFAULT 0",
+  "ALTER TABLE devices ADD COLUMN unpaired_at TEXT NULL",
+  "ALTER TABLE devices ADD COLUMN revoked_reason TEXT NULL",
   // Migrate legacy status labels from v1 seed if present
   "UPDATE payment_intents SET status = 'PENDING' WHERE status = 'CREATED'",
   "UPDATE payment_intents SET status = 'DETECTED' WHERE status = 'CUSTOMER_SUBMITTED'",
@@ -536,17 +610,193 @@ export async function ensureSeedData(): Promise<void> {
     }
   }
 
+  // Seed Commercial SaaS Subscription Packages (idempotent)
+  const existingPackages = await db.queryOne<{ cnt: number }>('SELECT COUNT(*) as cnt FROM subscription_packages');
+  if (!existingPackages || Number(existingPackages.cnt) === 0) {
+    const packages = [
+      [
+        newId(),
+        'STARTER',
+        'Starter',
+        'Single storefront starter with personal bKash, Nagad & Rocket automation',
+        490.0,
+        4900.0,
+        1,
+        1,
+        300,
+        JSON.stringify(['BKASH', 'NAGAD', 'ROCKET']),
+        1,
+        1,
+        1,
+        1,
+        90,
+        'EMAIL_STANDARD',
+        1,
+        1,
+        now,
+        now,
+      ],
+      [
+        newId(),
+        'BASIC',
+        'Basic',
+        'Growing e-commerce stores needing multi-device & Upay support',
+        990.0,
+        9900.0,
+        2,
+        2,
+        1200,
+        JSON.stringify(['BKASH', 'NAGAD', 'ROCKET', 'UPAY']),
+        1,
+        1,
+        1,
+        1,
+        180,
+        'EMAIL_PRIORITY',
+        1,
+        2,
+        now,
+        now,
+      ],
+      [
+        newId(),
+        'PROFESSIONAL',
+        'Professional',
+        'Multi-site businesses with CellFin, Bangla QR & Priority Matching',
+        2490.0,
+        24900.0,
+        5,
+        5,
+        6000,
+        JSON.stringify(['BKASH', 'NAGAD', 'ROCKET', 'UPAY', 'CELLFIN', 'BANGLA_QR']),
+        1,
+        1,
+        1,
+        1,
+        365,
+        'LIVE_CHAT_PRIORITY',
+        1,
+        3,
+        now,
+        now,
+      ],
+      [
+        newId(),
+        'BUSINESS',
+        'Business',
+        'High-volume brands with all 7 channels including Bank SMS & 2-year ledger',
+        4990.0,
+        49900.0,
+        15,
+        15,
+        25000,
+        JSON.stringify(['BKASH', 'NAGAD', 'ROCKET', 'UPAY', 'CELLFIN', 'BANGLA_QR', 'BANK_SMS']),
+        1,
+        1,
+        1,
+        1,
+        730,
+        'DEDICATED_WHATSAPP',
+        1,
+        4,
+        now,
+        now,
+      ],
+      [
+        newId(),
+        'ENTERPRISE',
+        'Enterprise',
+        'Unlimited-scale SaaS agencies & marketplaces with 24/7 SLA',
+        12990.0,
+        129900.0,
+        100,
+        50,
+        250000,
+        JSON.stringify(['BKASH', 'NAGAD', 'ROCKET', 'UPAY', 'CELLFIN', 'BANGLA_QR', 'BANK_SMS']),
+        1,
+        1,
+        1,
+        1,
+        1825,
+        'DEDICATED_SLA_24X7',
+        1,
+        5,
+        now,
+        now,
+      ],
+    ];
+    for (const pkg of packages) {
+      await db.execute(
+        `INSERT INTO subscription_packages (
+          id, code, name, tagline, monthly_price_bdt, yearly_price_bdt, max_websites, max_devices,
+          monthly_tx_limit, allowed_providers_json, allow_personal_wallets, allow_auto_matching,
+          allow_webhooks, allow_api_access, history_retention_days, support_level, is_active,
+          sort_order, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        pkg,
+      );
+    }
+  }
+
   const existingUsers = await db.queryOne<{ cnt: number }>('SELECT COUNT(*) as cnt FROM users');
   if (existingUsers && Number(existingUsers.cnt) > 0) {
-    // Ensure new demo wallets/websites exist if upgraded from v1 DB
-    const m1 = await db.queryOne<{ id: string }>('SELECT id FROM merchants LIMIT 1');
+    // Ensure new demo wallets/websites/subscriptions/test keys exist if upgraded from earlier DB
+    const allMerchants = await db.query<{
+      id: string;
+      api_secret_enc: string | null;
+      test_api_key_hash: string | null;
+    }>('SELECT id, api_secret_enc, test_api_key_hash FROM merchants');
+
+    const proPkg = await db.queryOne<{ id: string; monthly_price_bdt: number }>(
+      "SELECT id, monthly_price_bdt FROM subscription_packages WHERE code = 'PROFESSIONAL' LIMIT 1",
+    );
+
+    for (const m of allMerchants) {
+      if (!m.api_secret_enc || !m.test_api_key_hash) {
+        const testKey = generateApiKey('tl_test');
+        const apiSecret = encryptSecret(`tl_sec_${generateSecretHex(24)}`);
+        await db.execute(
+          `UPDATE merchants
+           SET api_secret_enc = COALESCE(api_secret_enc, ?),
+               test_api_key_prefix = COALESCE(test_api_key_prefix, ?),
+               test_api_key_hash = COALESCE(test_api_key_hash, ?)
+           WHERE id = ?`,
+          [apiSecret, testKey.prefix, testKey.hash, m.id],
+        );
+      }
+
+      if (proPkg) {
+        const hasSub = await db.queryOne<{ id: string }>(
+          'SELECT id FROM merchant_subscriptions WHERE merchant_id = ? LIMIT 1',
+          [m.id],
+        );
+        if (!hasSub) {
+          const subId = newId();
+          await db.execute(
+            `INSERT INTO merchant_subscriptions (
+              id, merchant_id, package_id, billing_cycle, status, price_bdt,
+              current_period_start, current_period_end, tx_used_current_period, auto_renew, created_at, updated_at
+            ) VALUES (?, ?, ?, 'MONTHLY', 'ACTIVE', ?, ?, ?, 0, 1, ?, ?)`,
+            [subId, m.id, proPkg.id, proPkg.monthly_price_bdt, isoNow(-5 * 86400_000), isoNow(25 * 86400_000), now, now],
+          );
+          await db.execute(
+            `INSERT INTO subscription_invoices (
+              id, merchant_id, subscription_id, package_id, invoice_number, billing_cycle, amount_bdt, payment_method, status, paid_at, created_at
+            ) VALUES (?, ?, ?, ?, ?, 'MONTHLY', ?, 'BKASH', 'PAID', ?, ?)`,
+            [newId(), m.id, subId, proPkg.id, `INV-${Date.now().toString().slice(-6)}-${generateSecretHex(2).toUpperCase()}`, proPkg.monthly_price_bdt, isoNow(-5 * 86400_000), isoNow(-5 * 86400_000)],
+          );
+        }
+      }
+    }
+
+    const m1 = allMerchants[0];
     if (m1) {
       const sites = await db.queryOne<{ cnt: number }>('SELECT COUNT(*) as cnt FROM merchant_websites');
       if (!sites || Number(sites.cnt) === 0) {
         await db.execute(
-          `INSERT INTO merchant_websites (id, merchant_id, site_name, domain, platform, callback_url, is_active, created_at)
-           VALUES (?, ?, 'DeshiCart Main Store', 'shop.deshicart.com.bd', 'WOOCOMMERCE', 'https://shop.deshicart.com.bd/wp-json/takaledger/v1/webhook', 1, ?)`,
-          [newId(), m1.id, now],
+          `INSERT INTO merchant_websites (id, merchant_id, site_name, domain, platform, callback_url, verification_token, verification_status, verified_at, is_active, created_at)
+           VALUES (?, ?, 'DeshiCart Main Store', 'shop.deshicart.com.bd', 'WOOCOMMERCE', 'https://shop.deshicart.com.bd/wp-json/takaledger/v1/webhook', ?, 'VERIFIED', ?, 1, ?)`,
+          [newId(), m1.id, `tl-verify-${generateSecretHex(8)}`, now, now],
         );
       }
     }
@@ -569,24 +819,38 @@ export async function ensureSeedData(): Promise<void> {
   const m2Id = newId();
   const m1Key = generateApiKey('tl_live');
   const m2Key = generateApiKey('tl_live');
+  const m1TestKey = generateApiKey('tl_test');
+  const m2TestKey = generateApiKey('tl_test');
+  const m1ApiSecret = encryptSecret(`tl_sec_${generateSecretHex(24)}`);
+  const m2ApiSecret = encryptSecret(`tl_sec_${generateSecretHex(24)}`);
   const m1WebhookSecret = encryptSecret(generateSecretHex(24));
   const m2WebhookSecret = encryptSecret(generateSecretHex(24));
 
   await db.execute(
-    `INSERT INTO merchants (id, name, slug, business_type, contact_email, webhook_url, webhook_secret_enc, api_key_prefix, api_key_hash, allowed_ips_json, settlement_mode, fee_percent, settled_balance_bdt, pending_balance_bdt, status, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO merchants (
+      id, name, slug, business_type, contact_email, business_phone, business_address,
+      webhook_url, webhook_secret_enc, api_key_prefix, api_key_hash, api_secret_enc,
+      test_api_key_prefix, test_api_key_hash, allowed_ips_json, settlement_mode,
+      auto_verify_policy, fee_percent, settled_balance_bdt, pending_balance_bdt, status, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       m1Id,
       'DeshiCart Electronics BD',
       'deshicart-bd',
       'RETAIL_ECOMMERCE',
       'finance@deshicart.com.bd',
+      '+8801711002233',
+      'House 14, Road 6, Gulshan-1, Dhaka 1212',
       `${env.appUrl}/api/demo-merchant-webhook`,
       m1WebhookSecret,
       m1Key.prefix,
       m1Key.hash,
+      m1ApiSecret,
+      m1TestKey.prefix,
+      m1TestKey.hash,
       JSON.stringify(['0.0.0.0/0']),
       'PROVIDER_API_OR_MANUAL',
+      'DETERMINISTIC_PERSONAL_PROOF',
       1.5,
       4800.0,
       4000.0,
@@ -597,20 +861,30 @@ export async function ensureSeedData(): Promise<void> {
   );
 
   await db.execute(
-    `INSERT INTO merchants (id, name, slug, business_type, contact_email, webhook_url, webhook_secret_enc, api_key_prefix, api_key_hash, allowed_ips_json, settlement_mode, fee_percent, settled_balance_bdt, pending_balance_bdt, status, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO merchants (
+      id, name, slug, business_type, contact_email, business_phone, business_address,
+      webhook_url, webhook_secret_enc, api_key_prefix, api_key_hash, api_secret_enc,
+      test_api_key_prefix, test_api_key_hash, allowed_ips_json, settlement_mode,
+      auto_verify_policy, fee_percent, settled_balance_bdt, pending_balance_bdt, status, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       m2Id,
       'Padma SaaS & Cloud',
       'padma-cloud',
       'SAAS_SUBSCRIPTION',
       'billing@padmacloud.bd',
+      '+8801614009911',
+      'Level 8, Kawran Bazar, Dhaka 1215',
       `${env.appUrl}/api/demo-merchant-webhook`,
       m2WebhookSecret,
       m2Key.prefix,
       m2Key.hash,
+      m2ApiSecret,
+      m2TestKey.prefix,
+      m2TestKey.hash,
       JSON.stringify(['0.0.0.0/0']),
       'PROVIDER_API_OR_MANUAL',
+      'DETERMINISTIC_PERSONAL_PROOF',
       1.25,
       0.0,
       6500.0,
@@ -624,15 +898,83 @@ export async function ensureSeedData(): Promise<void> {
   const wSite1 = newId();
   const wSite2 = newId();
   await db.execute(
-    `INSERT INTO merchant_websites (id, merchant_id, site_name, domain, platform, callback_url, is_active, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, 1, ?)`,
-    [wSite1, m1Id, 'DeshiCart WooCommerce Store', 'shop.deshicart.com.bd', 'WOOCOMMERCE', `${env.appUrl}/api/demo-merchant-webhook`, now],
+    `INSERT INTO merchant_websites (
+      id, merchant_id, site_name, domain, platform, callback_url, success_url, cancel_url,
+      verification_token, verification_status, verified_at, mode, is_active, created_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'VERIFIED', ?, 'LIVE', 1, ?)`,
+    [
+      wSite1,
+      m1Id,
+      'DeshiCart WooCommerce Store',
+      'shop.deshicart.com.bd',
+      'WOOCOMMERCE',
+      `${env.appUrl}/api/demo-merchant-webhook`,
+      'https://shop.deshicart.com.bd/checkout/order-received',
+      'https://shop.deshicart.com.bd/checkout',
+      `tl-verify-${generateSecretHex(8)}`,
+      now,
+      now,
+    ],
   );
   await db.execute(
-    `INSERT INTO merchant_websites (id, merchant_id, site_name, domain, platform, callback_url, is_active, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, 1, ?)`,
-    [wSite2, m2Id, 'Padma Cloud Billing Portal', 'billing.padmacloud.bd', 'CUSTOM', `${env.appUrl}/api/demo-merchant-webhook`, now],
+    `INSERT INTO merchant_websites (
+      id, merchant_id, site_name, domain, platform, callback_url, success_url, cancel_url,
+      verification_token, verification_status, verified_at, mode, is_active, created_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'VERIFIED', ?, 'LIVE', 1, ?)`,
+    [
+      wSite2,
+      m2Id,
+      'Padma Cloud Billing Portal',
+      'billing.padmacloud.bd',
+      'CUSTOM',
+      `${env.appUrl}/api/demo-merchant-webhook`,
+      'https://billing.padmacloud.bd/invoices/paid',
+      'https://billing.padmacloud.bd/invoices/cancelled',
+      `tl-verify-${generateSecretHex(8)}`,
+      now,
+      now,
+    ],
   );
+
+  // Subscriptions & SaaS Revenue Invoices for seeded merchants
+  const proPkgSeed = await db.queryOne<{ id: string; monthly_price_bdt: number }>(
+    "SELECT id, monthly_price_bdt FROM subscription_packages WHERE code = 'PROFESSIONAL' LIMIT 1",
+  );
+  const bizPkgSeed = await db.queryOne<{ id: string; monthly_price_bdt: number }>(
+    "SELECT id, monthly_price_bdt FROM subscription_packages WHERE code = 'BUSINESS' LIMIT 1",
+  );
+  if (proPkgSeed) {
+    const sub1Id = newId();
+    await db.execute(
+      `INSERT INTO merchant_subscriptions (
+        id, merchant_id, package_id, billing_cycle, status, price_bdt,
+        current_period_start, current_period_end, tx_used_current_period, auto_renew, created_at, updated_at
+      ) VALUES (?, ?, ?, 'MONTHLY', 'ACTIVE', ?, ?, ?, 6, 1, ?, ?)`,
+      [sub1Id, m1Id, proPkgSeed.id, proPkgSeed.monthly_price_bdt, isoNow(-5 * 86400_000), isoNow(25 * 86400_000), now, now],
+    );
+    await db.execute(
+      `INSERT INTO subscription_invoices (
+        id, merchant_id, subscription_id, package_id, invoice_number, billing_cycle, amount_bdt, payment_method, status, paid_at, created_at
+      ) VALUES (?, ?, ?, ?, 'INV-2026-0001', 'MONTHLY', ?, 'BKASH', 'PAID', ?, ?)`,
+      [newId(), m1Id, sub1Id, proPkgSeed.id, proPkgSeed.monthly_price_bdt, isoNow(-5 * 86400_000), isoNow(-5 * 86400_000)],
+    );
+  }
+  if (bizPkgSeed) {
+    const sub2Id = newId();
+    await db.execute(
+      `INSERT INTO merchant_subscriptions (
+        id, merchant_id, package_id, billing_cycle, status, price_bdt,
+        current_period_start, current_period_end, tx_used_current_period, auto_renew, created_at, updated_at
+      ) VALUES (?, ?, ?, 'MONTHLY', 'ACTIVE', ?, ?, ?, 1, 1, ?, ?)`,
+      [sub2Id, m2Id, bizPkgSeed.id, bizPkgSeed.monthly_price_bdt, isoNow(-2 * 86400_000), isoNow(28 * 86400_000), now, now],
+    );
+    await db.execute(
+      `INSERT INTO subscription_invoices (
+        id, merchant_id, subscription_id, package_id, invoice_number, billing_cycle, amount_bdt, payment_method, status, paid_at, created_at
+      ) VALUES (?, ?, ?, ?, 'INV-2026-0002', 'MONTHLY', ?, 'NAGAD', 'PAID', ?, ?)`,
+      [newId(), m2Id, sub2Id, bizPkgSeed.id, bizPkgSeed.monthly_price_bdt, isoNow(-2 * 86400_000), isoNow(-2 * 86400_000)],
+    );
+  }
 
   const adminId = newId();
   const reviewerId = newId();

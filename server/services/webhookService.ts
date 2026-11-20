@@ -174,3 +174,154 @@ export async function attemptWebhookDelivery(deliveryId: string): Promise<{
 
   return { delivered, httpStatus, error: delivered ? undefined : responseBody };
 }
+
+export async function sendMerchantTestWebhook(params: {
+  merchantId: string;
+  websiteId?: string | null;
+  targetUrlOverride?: string | null;
+  actorId: string;
+  actorEmail?: string | null;
+}): Promise<{
+  delivered: boolean;
+  targetUrl: string | null;
+  httpStatus: number | null;
+  signatureHeader: string;
+  responseBody: string;
+  payload: Record<string, unknown>;
+}> {
+  const db = getDb();
+  const merchant = await db.queryOne<MerchantWebhookConfig>(
+    'SELECT id, name, webhook_url, webhook_secret_enc FROM merchants WHERE id = ?',
+    [params.merchantId],
+  );
+  if (!merchant) {
+    throw new Error('Merchant not found');
+  }
+
+  let siteUrl: string | null = null;
+  if (params.websiteId) {
+    const site = await db.queryOne<{ callback_url: string | null }>(
+      'SELECT callback_url FROM merchant_websites WHERE id = ? AND merchant_id = ?',
+      [params.websiteId, params.merchantId],
+    );
+    siteUrl = site?.callback_url ?? null;
+  }
+
+  const targetUrl =
+    params.targetUrlOverride?.trim() || siteUrl?.trim() || merchant.webhook_url?.trim() || null;
+
+  if (!targetUrl) {
+    return {
+      delivered: false,
+      targetUrl: null,
+      httpStatus: null,
+      signatureHeader: '',
+      responseBody: 'No webhook_url or website callback_url configured for this merchant.',
+      payload: {},
+    };
+  }
+
+  let secret = '';
+  if (merchant.webhook_secret_enc) {
+    try {
+      secret = decryptSecret(merchant.webhook_secret_enc);
+    } catch {
+      secret = '';
+    }
+  }
+
+  const payload = {
+    id: newId(),
+    event: 'webhook.test',
+    createdAt: new Date().toISOString(),
+    data: {
+      merchantId: merchant.id,
+      merchantName: merchant.name,
+      mode: 'TEST',
+      message: 'TakaLedger signed webhook connectivity verification.',
+      samplePayment: {
+        paymentId: `test_${newId().slice(0, 8)}`,
+        merchantOrderId: `TL-TEST-${Date.now().toString().slice(-6)}`,
+        provider: 'BKASH',
+        amountBdt: 100.0,
+        status: 'SUCCESS',
+      },
+    },
+  };
+
+  const rawBody = JSON.stringify(payload);
+  const signatureHeader = secret
+    ? buildWebhookSignatureHeader(secret, rawBody)
+    : 't=0,v1=unconfigured';
+
+  let httpStatus: number | null = null;
+  let responseBody = '';
+  let delivered = false;
+
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 6000);
+    const resp = await fetch(targetUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Gateway-Event': 'webhook.test',
+        'X-Gateway-Delivery': payload.id,
+        'X-Gateway-Signature': signatureHeader,
+      },
+      body: rawBody,
+      signal: controller.signal,
+    });
+    clearTimeout(timer);
+    httpStatus = resp.status;
+    responseBody = (await resp.text()).slice(0, 1000);
+    delivered = resp.ok;
+  } catch (err) {
+    responseBody = err instanceof Error ? err.message : 'Network error';
+  }
+
+  await recordAuditLog({
+    actorType: 'USER',
+    actorId: params.actorId,
+    actorEmail: params.actorEmail ?? null,
+    action: delivered ? 'WEBHOOK_TEST_DELIVERED' : 'WEBHOOK_TEST_FAILED',
+    resourceType: 'merchant',
+    resourceId: merchant.id,
+    afterState: { targetUrl, httpStatus, delivered },
+  });
+
+  return { delivered, targetUrl, httpStatus, signatureHeader, responseBody, payload };
+}
+
+let retryWorkerTimer: ReturnType<typeof setInterval> | null = null;
+let retryWorkerRunning = false;
+
+export function startWebhookRetryWorker(intervalMs = 30_000): void {
+  if (retryWorkerTimer) return;
+  retryWorkerTimer = setInterval(async () => {
+    if (retryWorkerRunning) return;
+    retryWorkerRunning = true;
+    try {
+      const db = getDb();
+      const now = isoNow();
+      const due = await db.query<{ id: string }>(
+        `SELECT id FROM webhook_deliveries
+         WHERE status = 'FAILED' AND attempt_count < 5 AND next_retry_at IS NOT NULL AND next_retry_at <= ?
+         ORDER BY next_retry_at ASC
+         LIMIT 15`,
+        [now],
+      );
+      for (const row of due) {
+        await attemptWebhookDelivery(row.id);
+      }
+    } catch (err) {
+      console.error('[WebhookRetryWorker] Tick failed:', err);
+    } finally {
+      retryWorkerRunning = false;
+    }
+  }, intervalMs);
+  if (typeof retryWorkerTimer.unref === 'function') {
+    retryWorkerTimer.unref();
+  }
+}
+

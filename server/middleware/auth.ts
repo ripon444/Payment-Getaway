@@ -19,6 +19,8 @@ export interface AuthedMerchant {
   name: string;
   slug: string;
   status: string;
+  mode: 'LIVE' | 'TEST';
+  autoVerifyPolicy: 'STRICT_API_ONLY' | 'DETERMINISTIC_PERSONAL_PROOF';
 }
 
 export interface AuthedDevice {
@@ -108,9 +110,12 @@ export function requireRole(...roles: UserRole[]) {
 }
 
 export async function requireMerchantApi(req: AuthedRequest, res: Response, next: NextFunction): Promise<void> {
-  const apiKey = req.header('X-Merchant-Key') || '';
+  const authHeader = req.header('Authorization') || '';
+  const bearerKey = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : '';
+  const apiKey = (req.header('X-Merchant-Key') || bearerKey || '').trim();
+
   if (!apiKey) {
-    res.status(401).json({ error: 'Missing X-Merchant-Key header' });
+    res.status(401).json({ error: 'Missing X-Merchant-Key or Authorization: Bearer <apiKey> header' });
     return;
   }
 
@@ -122,7 +127,17 @@ export async function requireMerchantApi(req: AuthedRequest, res: Response, next
     slug: string;
     status: string;
     webhook_secret_enc: string | null;
-  }>('SELECT id, name, slug, status, webhook_secret_enc FROM merchants WHERE api_key_hash = ?', [keyHash]);
+    api_secret_enc: string | null;
+    api_key_hash: string;
+    test_api_key_hash: string | null;
+    auto_verify_policy: string | null;
+  }>(
+    `SELECT id, name, slug, status, webhook_secret_enc, api_secret_enc,
+            api_key_hash, test_api_key_hash, auto_verify_policy
+     FROM merchants
+     WHERE api_key_hash = ? OR test_api_key_hash = ?`,
+    [keyHash, keyHash],
+  );
 
   if (!merchant) {
     res.status(401).json({ error: 'Invalid merchant API key' });
@@ -131,6 +146,21 @@ export async function requireMerchantApi(req: AuthedRequest, res: Response, next
   if (merchant.status !== 'ACTIVE') {
     res.status(403).json({ error: `Merchant account is ${merchant.status}` });
     return;
+  }
+
+  // Optional X-Api-Secret header validation when supplied
+  const providedSecret = req.header('X-Api-Secret');
+  if (providedSecret && merchant.api_secret_enc) {
+    try {
+      const expectedApiSecret = decryptSecret(merchant.api_secret_enc);
+      if (providedSecret.trim() !== expectedApiSecret) {
+        res.status(401).json({ error: 'Invalid X-Api-Secret header' });
+        return;
+      }
+    } catch {
+      res.status(401).json({ error: 'Merchant secret validation error' });
+      return;
+    }
   }
 
   // Optional HMAC request signature verification when X-Merchant-Signature is provided
@@ -150,11 +180,18 @@ export async function requireMerchantApi(req: AuthedRequest, res: Response, next
     }
   }
 
+  const keyMode: 'LIVE' | 'TEST' = merchant.test_api_key_hash === keyHash ? 'TEST' : 'LIVE';
+
   req.merchant = {
     id: merchant.id,
     name: merchant.name,
     slug: merchant.slug,
     status: merchant.status,
+    mode: keyMode,
+    autoVerifyPolicy:
+      merchant.auto_verify_policy === 'STRICT_API_ONLY'
+        ? 'STRICT_API_ONLY'
+        : 'DETERMINISTIC_PERSONAL_PROOF',
   };
   next();
 }

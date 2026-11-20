@@ -3,7 +3,9 @@ import {
   Activity,
   BellRing,
   Building2,
+  Code2,
   CreditCard,
+  Layers,
   LogOut,
   Menu,
   QrCode,
@@ -13,6 +15,7 @@ import {
   Smartphone,
   X,
 } from 'lucide-react';
+import { ApiDocsTab } from './components/ApiDocsTab.tsx';
 import { CheckoutPage } from './components/CheckoutPage.tsx';
 import { DevicesTab } from './components/DevicesTab.tsx';
 import { FraudHealthTab } from './components/FraudHealthTab.tsx';
@@ -20,9 +23,11 @@ import { LoginView } from './components/LoginView.tsx';
 import { MerchantsTab } from './components/MerchantsTab.tsx';
 import { NotificationsTab } from './components/NotificationsTab.tsx';
 import { OverviewTab, type OverviewData } from './components/OverviewTab.tsx';
+import { PackagesTab } from './components/PackagesTab.tsx';
 import { PaymentsTab } from './components/PaymentsTab.tsx';
 import { ProvidersQrTab } from './components/ProvidersQrTab.tsx';
 import { SecurityAuditTab } from './components/SecurityAuditTab.tsx';
+import { SubscriptionApkTab } from './components/SubscriptionApkTab.tsx';
 import { apiFetch, getStoredToken, setStoredToken } from './lib/api.ts';
 import { createGatewaySocket } from './lib/socket.ts';
 import type {
@@ -40,26 +45,33 @@ type NavTab =
   | 'notifications'
   | 'devices'
   | 'merchants'
+  | 'packages'
+  | 'subscription'
+  | 'apidocs'
   | 'fraud'
   | 'security';
 
 const ADMIN_NAV_ITEMS: Array<{ id: NavTab; label: string; icon: typeof Activity }> = [
   { id: 'overview', label: 'Overview', icon: Activity },
   { id: 'payments', label: 'Payments & Matching', icon: CreditCard },
-  { id: 'providers', label: 'Bangla QR & Providers', icon: QrCode },
-  { id: 'notifications', label: 'SMS & Notification Parsers', icon: BellRing },
-  { id: 'devices', label: 'Android Devices', icon: Smartphone },
+  { id: 'packages', label: 'SaaS Packages & Revenue', icon: Layers },
   { id: 'merchants', label: 'Merchants & Websites', icon: Building2 },
+  { id: 'devices', label: 'Android Devices', icon: Smartphone },
+  { id: 'notifications', label: 'SMS & Notification Parsers', icon: BellRing },
+  { id: 'providers', label: 'Bangla QR & Providers', icon: QrCode },
+  { id: 'apidocs', label: 'Developer API Docs', icon: Code2 },
   { id: 'fraud', label: 'Fraud, Usage & Health', icon: ShieldAlert },
   { id: 'security', label: 'Users & Audit Logs', icon: ShieldCheck },
 ];
 
 const MERCHANT_NAV_ITEMS: Array<{ id: NavTab; label: string; icon: typeof Activity }> = [
   { id: 'overview', label: 'Merchant Overview', icon: Activity },
-  { id: 'payments', label: 'Orders & Sessions', icon: CreditCard },
-  { id: 'merchants', label: 'Websites, API & Webhooks', icon: Building2 },
+  { id: 'payments', label: 'Orders & Zero-TrxID', icon: CreditCard },
+  { id: 'merchants', label: 'Websites, Wallets & Keys', icon: Building2 },
   { id: 'devices', label: 'My Android Nodes', icon: Smartphone },
+  { id: 'subscription', label: 'Plan, Quotas & APK', icon: Layers },
   { id: 'notifications', label: 'Incoming Alerts', icon: BellRing },
+  { id: 'apidocs', label: 'API & Integration Docs', icon: Code2 },
   { id: 'fraud', label: 'API Usage & Alerts', icon: ShieldAlert },
 ];
 
@@ -353,6 +365,18 @@ export default function App() {
               onRefresh={loadWorkspaceData}
             />
           )}
+          {activeTab === 'packages' && (
+            <PackagesTab user={user} onRefreshWorkspace={loadWorkspaceData} />
+          )}
+          {activeTab === 'subscription' && (
+            <SubscriptionApkTab
+              user={user}
+              merchants={merchants}
+              onNavigateDevices={() => setActiveTab('devices')}
+              onRefreshWorkspace={loadWorkspaceData}
+            />
+          )}
+          {activeTab === 'apidocs' && <ApiDocsTab user={user} merchants={merchants} />}
           {activeTab === 'fraud' && <FraudHealthTab user={user} />}
           {activeTab === 'security' && (
             <SecurityAuditTab user={user} merchants={merchants} />

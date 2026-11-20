@@ -95,7 +95,7 @@ export function DevicesTab({ user, devices, merchants, wallets, onRefresh }: Dev
             deviceUid: `AND-SIM-${Math.random().toString(36).slice(2, 7).toUpperCase()}`,
             androidModel: 'Samsung Galaxy A15 (Test Agent)',
             androidVersion: 'Android 14',
-            appVersion: '2.0.0',
+            appVersion: '2.1.0',
             simSlots: [
               { slot: 1, carrier: 'Grameenphone' },
               { slot: 2, carrier: 'Robi' },
@@ -115,6 +115,14 @@ export function DevicesTab({ user, devices, merchants, wallets, onRefresh }: Dev
     await apiFetch(`/api/devices/${deviceId}`, {
       method: 'PATCH',
       body: JSON.stringify({ status }),
+    });
+    onRefresh();
+  }
+
+  async function handleUnpairDevice(deviceId: string) {
+    await apiFetch(`/api/devices/${deviceId}/unpair`, {
+      method: 'POST',
+      body: JSON.stringify({ reason: 'Unpaired by merchant/operator' }),
     });
     onRefresh();
   }
@@ -195,6 +203,7 @@ export function DevicesTab({ user, devices, merchants, wallets, onRefresh }: Dev
                   <p className="text-xs text-slate-500 mt-0.5">
                     {dev.merchant_name || 'Global Pool'} ·{' '}
                     <span className="font-mono">{dev.device_uid || 'Awaiting Handshake'}</span>
+                    {dev.app_version ? <span className="font-mono"> · v{dev.app_version}</span> : null}
                   </p>
                 </div>
               </div>
@@ -286,10 +295,10 @@ export function DevicesTab({ user, devices, merchants, wallets, onRefresh }: Dev
                   {dev.status !== 'REVOKED' && (
                     <button
                       type="button"
-                      onClick={() => handleUpdateDeviceStatus(dev.id, 'REVOKED')}
+                      onClick={() => handleUnpairDevice(dev.id)}
                       className="px-2.5 py-1 text-xs font-medium text-rose-700 bg-rose-50 hover:bg-rose-100 border border-rose-200 rounded-md"
                     >
-                      Revoke
+                      Unpair & Revoke
                     </button>
                   )}
                 </div>

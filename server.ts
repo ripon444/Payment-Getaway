@@ -17,6 +17,8 @@ import { merchantApiRoutes } from './server/routes/merchantApiRoutes.ts';
 import { merchantRoutes } from './server/routes/merchantRoutes.ts';
 import { notificationRoutes } from './server/routes/notificationRoutes.ts';
 import { paymentRoutes } from './server/routes/paymentRoutes.ts';
+import { saasRoutes } from './server/routes/saasRoutes.ts';
+import { startWebhookRetryWorker } from './server/services/webhookService.ts';
 
 async function bootstrap() {
   getDb();
@@ -57,6 +59,7 @@ async function bootstrap() {
   });
 
   app.use('/api/auth/login', authLimiter);
+  app.use('/api/auth/register-merchant', authLimiter);
   app.use('/api/v1', apiLimiter);
   app.use('/api/checkout', apiLimiter);
 
@@ -81,6 +84,7 @@ async function bootstrap() {
   app.use('/api/merchants', merchantRoutes);
   app.use('/api/devices', deviceRoutes);
   app.use('/api/notifications', notificationRoutes);
+  app.use('/api', saasRoutes);
   app.use('/api', paymentRoutes);
   app.use('/api/v1', merchantApiRoutes);
   app.use('/api/checkout', checkoutRoutes);
@@ -108,6 +112,7 @@ async function bootstrap() {
 
   const httpServer = http.createServer(app);
   initSocketServer(httpServer);
+  startWebhookRetryWorker(30_000);
 
   const onListening = () => {
     const addr = typeof env.port === 'string' ? env.port : `http://0.0.0.0:${env.port}`;

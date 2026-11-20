@@ -8,6 +8,7 @@ import android.net.NetworkCapabilities
 import android.os.BatteryManager
 import androidx.work.CoroutineWorker
 import androidx.work.WorkerParameters
+import bd.takaledger.agent.BuildConfig
 import bd.takaledger.agent.crypto.DeviceCryptoStore
 import bd.takaledger.agent.data.OfflineQueueDatabase
 import okhttp3.MediaType.Companion.toMediaType
@@ -72,9 +73,11 @@ class EventSyncWorker(
                 client.newCall(request).execute().use { response ->
                     val uids = batch.map { it.eventUid }
                     if (response.isSuccessful) {
+                        store.setDeviceStatusNotice(null)
                         dao.markSynced(uids)
                         dao.pruneSyncedOlderThan(System.currentTimeMillis() - 7L * 24 * 3600 * 1000)
                     } else if (response.code in 401..403) {
+                        store.setDeviceStatusNotice("Device Suspended or Revoked by Merchant/Admin (HTTP ${response.code})")
                         dao.recordFailure(uids, "Auth/Revoked HTTP ${response.code}")
                         return Result.failure()
                     } else {
@@ -88,12 +91,17 @@ class EventSyncWorker(
             }
         }
 
-        // Send device telemetry heartbeat
-        sendHeartbeat(gatewayUrl, token, hmacSecret, dao.getPendingCount())
+        sendHeartbeat(store, gatewayUrl, token, hmacSecret, dao.getPendingCount())
         return Result.success()
     }
 
-    private fun sendHeartbeat(gatewayUrl: String, token: String, hmacSecret: String, queueDepth: Int) {
+    private fun sendHeartbeat(
+        store: DeviceCryptoStore,
+        gatewayUrl: String,
+        token: String,
+        hmacSecret: String,
+        queueDepth: Int
+    ) {
         val batteryIntent = applicationContext.registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
         val level = batteryIntent?.getIntExtra(BatteryManager.EXTRA_LEVEL, -1) ?: -1
         val scale = batteryIntent?.getIntExtra(BatteryManager.EXTRA_SCALE, -1) ?: -1
@@ -102,6 +110,7 @@ class EventSyncWorker(
         val rawBody = JSONObject().apply {
             put("batteryPct", batteryPct)
             put("networkType", resolveNetworkType())
+            put("appVersion", BuildConfig.VERSION_NAME)
             put("queueDepth", queueDepth)
         }.toString()
 
@@ -116,7 +125,15 @@ class EventSyncWorker(
             .post(rawBody.toRequestBody("application/json; charset=utf-8".toMediaType()))
             .build()
 
-        runCatching { client.newCall(req).execute().close() }
+        runCatching {
+            client.newCall(req).execute().use { res ->
+                if (res.code in 401..403) {
+                    store.setDeviceStatusNotice("Device Suspended or Revoked (HTTP ${res.code})")
+                } else if (res.isSuccessful) {
+                    store.setDeviceStatusNotice(null)
+                }
+            }
+        }
     }
 
     private fun resolveNetworkType(): String {

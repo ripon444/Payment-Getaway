@@ -399,3 +399,162 @@ export async function verifyPaymentViaProviderApi(params: {
 
   return { paymentId: payment.id, status: 'SUCCESS', verificationId };
 }
+
+export async function autoVerifyWithDeterministicProof(params: {
+  paymentId: string;
+  deviceId: string;
+  notificationEventId: string;
+  providerTrxId: string;
+  verifiedAmountBdt: number;
+  confidenceScore: number;
+  reasons: string[];
+  ipAddress?: string | null;
+}): Promise<{ verified: boolean; status: string; verificationId?: string; reason?: string }> {
+  const db = getDb();
+  const payment = await db.queryOne<
+    PaymentRow & { mode: string; account_mode: string; unique_paisa_offset: number }
+  >(
+    `SELECT id, merchant_id, wallet_id, merchant_order_id, provider, mode, account_mode,
+            amount_bdt, unique_paisa_offset, submitted_trx_id, status, matched_notification_id
+     FROM payment_intents WHERE id = ?`,
+    [params.paymentId],
+  );
+
+  if (!payment) {
+    return { verified: false, status: 'NOT_FOUND', reason: 'Payment intent not found' };
+  }
+  if (payment.status === 'SUCCESS') {
+    return { verified: true, status: 'SUCCESS', reason: 'Already settled' };
+  }
+
+  const normalizedTrx = params.providerTrxId.trim().toUpperCase();
+  if (normalizedTrx.length < 6) {
+    return { verified: false, status: payment.status, reason: 'Invalid TrxID length for deterministic proof' };
+  }
+  if (Math.abs(Number(payment.amount_bdt) - Number(params.verifiedAmountBdt)) >= 0.005) {
+    return { verified: false, status: payment.status, reason: 'Exact amount mismatch' };
+  }
+
+  // Atomic check: TrxID must never have been verified previously
+  const existingTrx = await db.queryOne<{ id: string }>(
+    `SELECT id FROM provider_verifications
+     WHERE provider = ? AND provider_trx_id = ? AND decision = 'VERIFIED' LIMIT 1`,
+    [payment.provider, normalizedTrx],
+  );
+  if (existingTrx) {
+    return { verified: false, status: payment.status, reason: 'TrxID already verified on another order' };
+  }
+
+  const verificationId = newId();
+  const now = isoNow();
+  const verificationMethod =
+    Number(payment.unique_paisa_offset || 0) > 0
+      ? 'ZERO_TRXID_MICRO_AMOUNT_HMAC_PROOF'
+      : 'ZERO_TRXID_DETERMINISTIC_PROOF';
+  const documentaryRef = `AUTO-${params.deviceId.slice(0, 8).toUpperCase()}-${normalizedTrx}`;
+
+  await db.withTransaction(async (tx) => {
+    await tx.execute(
+      `INSERT INTO provider_verifications (
+        id, payment_intent_id, verification_source, provider, provider_trx_id,
+        verified_amount_bdt, documentary_evidence_ref, provider_reference_payload_json,
+        verifier_user_id, notes, decision, verified_at
+      ) VALUES (?, ?, 'DETERMINISTIC_PERSONAL_PROOF', ?, ?, ?, ?, ?, NULL, ?, 'VERIFIED', ?)`,
+      [
+        verificationId,
+        payment.id,
+        payment.provider,
+        normalizedTrx,
+        params.verifiedAmountBdt,
+        documentaryRef,
+        JSON.stringify({
+          deviceId: params.deviceId,
+          notificationEventId: params.notificationEventId,
+          confidenceScore: params.confidenceScore,
+          proofFactors: params.reasons,
+          verificationMethod,
+        }),
+        `Automated Zero-TrxID deterministic verification (${params.reasons.join(', ')})`,
+        now,
+      ],
+    );
+
+    await tx.execute(
+      `UPDATE payment_intents
+       SET status = 'SUCCESS', submitted_trx_id = COALESCE(submitted_trx_id, ?),
+           verification_method = ?, auto_verified = 1,
+           verified_at = ?, settled_at = ?, updated_at = ?
+       WHERE id = ?`,
+      [normalizedTrx, verificationMethod, now, now, now, payment.id],
+    );
+
+    if (payment.mode !== 'TEST') {
+      if (payment.wallet_id) {
+        await tx.execute(
+          'UPDATE mfs_wallets SET daily_received_bdt = daily_received_bdt + ? WHERE id = ?',
+          [params.verifiedAmountBdt, payment.wallet_id],
+        );
+      }
+      await tx.execute(
+        'UPDATE merchants SET settled_balance_bdt = settled_balance_bdt + ? WHERE id = ?',
+        [params.verifiedAmountBdt, payment.merchant_id],
+      );
+    }
+
+    await tx.execute(
+      `UPDATE payment_match_candidates SET status = 'SELECTED'
+       WHERE payment_intent_id = ? AND notification_event_id = ?`,
+      [payment.id, params.notificationEventId],
+    );
+  });
+
+  emitPaymentUpdated({
+    paymentId: payment.id,
+    merchantId: payment.merchant_id,
+    status: 'SUCCESS',
+    provider: payment.provider,
+    amountBdt: Number(payment.amount_bdt),
+    matchConfidence: params.confidenceScore,
+  });
+
+  await recordAuditLog({
+    actorType: 'DEVICE',
+    actorId: params.deviceId,
+    action: 'PAYMENT_ZERO_TRXID_AUTO_VERIFIED_SUCCESS',
+    resourceType: 'payment_intent',
+    resourceId: payment.id,
+    ipAddress: params.ipAddress ?? null,
+    beforeState: { status: payment.status },
+    afterState: {
+      status: 'SUCCESS',
+      verificationId,
+      verificationSource: 'DETERMINISTIC_PERSONAL_PROOF',
+      verificationMethod,
+      documentaryRef,
+      providerTrxId: normalizedTrx,
+      proofFactors: params.reasons,
+    },
+  });
+
+  await dispatchMerchantWebhook({
+    merchantId: payment.merchant_id,
+    paymentIntentId: payment.id,
+    eventType: 'payment.verified_settled',
+    payload: {
+      paymentId: payment.id,
+      merchantOrderId: payment.merchant_order_id,
+      mode: payment.mode,
+      status: 'SUCCESS',
+      provider: payment.provider,
+      amountBdt: payment.amount_bdt,
+      trxId: normalizedTrx,
+      verificationSource: 'DETERMINISTIC_PERSONAL_PROOF',
+      verificationMethod,
+      documentaryEvidenceRef: documentaryRef,
+      verifiedAt: now,
+    },
+  });
+
+  return { verified: true, status: 'SUCCESS', verificationId };
+}
+

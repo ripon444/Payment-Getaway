@@ -37,7 +37,7 @@ interface OverviewTabProps {
   loading: boolean;
   isMerchantView?: boolean;
   onInspectPayment: (id: string) => void;
-  onNavigateTab: (tab: 'payments' | 'devices' | 'notifications' | 'fraud') => void;
+  onNavigateTab: (tab: 'payments' | 'devices' | 'notifications' | 'fraud' | 'subscription' | 'apidocs') => void;
 }
 
 export function OverviewTab({
@@ -84,22 +84,33 @@ export function OverviewTab({
           <div>
             <p className="text-sm font-medium text-slate-900">
               {isMerchantView
-                ? 'Merchant Settlement & Verification Guardrail'
-                : 'Two-Stage Verification Policy Active (8-Status Lifecycle)'}
+                ? 'Zero-TrxID Automated Payment Verification & Merchant SaaS Portal'
+                : 'Multi-Merchant SaaS Platform & Deterministic Auto-Settlement Engine'}
             </p>
             <p className="text-xs text-slate-600 mt-0.5">
-              Incoming MFS, CellFin, Bangla QR, and Bank SMS alerts transition orders to MATCHED or REVIEW_REQUIRED. SUCCESS triggers only after official Provider API confirmation or documented finance verification.
+              Customers pay without submitting TrxIDs or screenshots. Paired Android Agents stream HMAC-signed SMS & app alerts to match exact amounts, micro-paisa offsets, and wallets before dispatching signed webhooks.
             </p>
           </div>
         </div>
-        <button
-          type="button"
-          onClick={() => onNavigateTab('payments')}
-          className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-medium text-teal-800 bg-teal-50 hover:bg-teal-100 border border-teal-200 rounded-lg transition-colors whitespace-nowrap shrink-0"
-        >
-          <span>{isMerchantView ? 'View Orders' : 'Review Queue'}</span>
-          <ArrowRight className="h-3.5 w-3.5" />
-        </button>
+        <div className="flex items-center gap-2 shrink-0">
+          {isMerchantView && (
+            <button
+              type="button"
+              onClick={() => onNavigateTab('subscription')}
+              className="px-3.5 py-2 text-xs font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg whitespace-nowrap"
+            >
+              Plan & APK
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={() => onNavigateTab('payments')}
+            className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-medium text-teal-800 bg-teal-50 hover:bg-teal-100 border border-teal-200 rounded-lg transition-colors whitespace-nowrap"
+          >
+            <span>{isMerchantView ? 'View Orders' : 'Review Queue'}</span>
+            <ArrowRight className="h-3.5 w-3.5" />
+          </button>
+        </div>
       </div>
 
       {/* KPI Grid */}

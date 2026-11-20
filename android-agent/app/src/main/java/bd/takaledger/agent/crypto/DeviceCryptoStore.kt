@@ -10,8 +10,8 @@ import javax.crypto.Mac
 import javax.crypto.spec.SecretKeySpec
 
 /**
- * Stores paired device credentials inside Android Keystore-backed EncryptedSharedPreferences.
- * Never logs or persists plaintext credentials outside Keystore encryption.
+ * Stores paired multi-tenant device credentials inside Android Keystore-backed EncryptedSharedPreferences.
+ * Enforces strict merchant isolation and never persists plaintext credentials outside Keystore encryption.
  */
 class DeviceCryptoStore(context: Context) {
 
@@ -31,13 +31,20 @@ class DeviceCryptoStore(context: Context) {
         gatewayUrl: String,
         deviceId: String,
         deviceToken: String,
-        hmacSecret: String
+        hmacSecret: String,
+        merchantId: String? = null,
+        deviceName: String? = null,
+        assignedProviders: List<String> = emptyList()
     ) {
         prefs.edit()
             .putString(KEY_GATEWAY_URL, gatewayUrl.trimEnd('/'))
             .putString(KEY_DEVICE_ID, deviceId)
             .putString(KEY_DEVICE_TOKEN, deviceToken)
             .putString(KEY_HMAC_SECRET, hmacSecret)
+            .putString(KEY_MERCHANT_ID, merchantId)
+            .putString(KEY_DEVICE_NAME, deviceName)
+            .putString(KEY_ASSIGNED_PROVIDERS, assignedProviders.joinToString(","))
+            .remove(KEY_STATUS_NOTICE)
             .apply()
     }
 
@@ -50,6 +57,24 @@ class DeviceCryptoStore(context: Context) {
     fun getDeviceId(): String? = prefs.getString(KEY_DEVICE_ID, null)
     fun getDeviceToken(): String? = prefs.getString(KEY_DEVICE_TOKEN, null)
     fun getHmacSecret(): String? = prefs.getString(KEY_HMAC_SECRET, null)
+    fun getMerchantId(): String? = prefs.getString(KEY_MERCHANT_ID, null)
+    fun getDeviceName(): String? = prefs.getString(KEY_DEVICE_NAME, null)
+    fun getAssignedProviders(): List<String> =
+        prefs.getString(KEY_ASSIGNED_PROVIDERS, null)
+            ?.split(",")
+            ?.map { it.trim() }
+            ?.filter { it.isNotEmpty() }
+            ?: emptyList()
+
+    fun setDeviceStatusNotice(notice: String?) {
+        if (notice.isNullOrBlank()) {
+            prefs.edit().remove(KEY_STATUS_NOTICE).apply()
+        } else {
+            prefs.edit().putString(KEY_STATUS_NOTICE, notice).apply()
+        }
+    }
+
+    fun getDeviceStatusNotice(): String? = prefs.getString(KEY_STATUS_NOTICE, null)
 
     fun clearPairing() {
         prefs.edit().clear().apply()
@@ -60,6 +85,10 @@ class DeviceCryptoStore(context: Context) {
         private const val KEY_DEVICE_ID = "device_id"
         private const val KEY_DEVICE_TOKEN = "device_token"
         private const val KEY_HMAC_SECRET = "hmac_secret"
+        private const val KEY_MERCHANT_ID = "merchant_id"
+        private const val KEY_DEVICE_NAME = "device_name"
+        private const val KEY_ASSIGNED_PROVIDERS = "assigned_providers"
+        private const val KEY_STATUS_NOTICE = "status_notice"
 
         fun sha256Hex(input: String): String {
             val digest = MessageDigest.getInstance("SHA-256")

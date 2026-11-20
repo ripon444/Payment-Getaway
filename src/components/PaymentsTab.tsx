@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
-import { CheckCircle2, ExternalLink, Plus, QrCode, Search, ShieldCheck, X } from 'lucide-react';
-import { apiFetch, formatBdt, formatTimestamp } from '../lib/api.ts';
+import { CheckCircle2, Download, ExternalLink, Plus, QrCode, Search, ShieldCheck, X } from 'lucide-react';
+import { apiFetch, formatBdt, formatTimestamp, getStoredToken } from '../lib/api.ts';
 import {
   ALL_PROVIDERS,
   type AuthUser,
@@ -212,6 +212,26 @@ export function PaymentsTab({
     }
   }
 
+  async function handleExport(format: 'csv' | 'json') {
+    const token = getStoredToken();
+    const qs = new URLSearchParams({ format });
+    if (statusFilter !== 'ALL') qs.set('status', statusFilter);
+    if (providerFilter !== 'ALL') qs.set('provider', providerFilter);
+    const res = await fetch(`/api/merchant/reports/export?${qs.toString()}`, {
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+    });
+    if (!res.ok) return;
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `takaledger-payments-${Date.now()}.${format}`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  }
+
   const canManualVerify = user.role === 'SUPER_ADMIN' || user.role === 'FINANCE_REVIEWER';
 
   return (
@@ -258,14 +278,32 @@ export function PaymentsTab({
           </select>
         </div>
 
-        <button
-          type="button"
-          onClick={() => setShowCreate(true)}
-          className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-medium text-white bg-teal-700 hover:bg-teal-800 rounded-lg transition-colors whitespace-nowrap shrink-0"
-        >
-          <Plus className="h-4 w-4" />
-          <span>Create Payment Session</span>
-        </button>
+        <div className="flex flex-wrap items-center gap-2 shrink-0">
+          <button
+            type="button"
+            onClick={() => handleExport('csv')}
+            className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg whitespace-nowrap"
+          >
+            <Download className="h-3.5 w-3.5" />
+            <span>CSV</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => handleExport('json')}
+            className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg whitespace-nowrap"
+          >
+            <Download className="h-3.5 w-3.5" />
+            <span>JSON</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => setShowCreate(true)}
+            className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-medium text-white bg-teal-700 hover:bg-teal-800 rounded-lg transition-colors whitespace-nowrap"
+          >
+            <Plus className="h-4 w-4" />
+            <span>Create Payment Session</span>
+          </button>
+        </div>
       </div>
 
       {/* Payments Table */}
@@ -307,7 +345,12 @@ export function PaymentsTab({
                     onClick={() => onSelectPayment(p.id)}
                   >
                     <td className="py-3 px-4">
-                      <p className="font-mono text-xs font-medium text-slate-900">{p.merchant_order_id}</p>
+                      <p className="font-mono text-xs font-medium text-slate-900">
+                        {p.merchant_order_id}{' '}
+                        {p.mode === 'TEST' && (
+                          <span className="text-[10px] font-mono text-amber-700 font-semibold">[TEST]</span>
+                        )}
+                      </p>
                       <p className="font-mono text-xs text-slate-500">Ref: {p.reference_code}</p>
                     </td>
                     <td className="py-3 px-4 text-xs text-slate-700">{p.merchant_name}</td>
@@ -316,9 +359,14 @@ export function PaymentsTab({
                     </td>
                     <td className="py-3 px-4 text-right font-mono tabular-nums font-medium text-slate-900">
                       {formatBdt(p.amount_bdt)}
+                      {Number(p.unique_paisa_offset ?? 0) > 0 && (
+                        <span className="block text-[10px] text-teal-700">
+                          +৳{Number(p.unique_paisa_offset).toFixed(2)} match code
+                        </span>
+                      )}
                     </td>
                     <td className="py-3 px-4 font-mono text-xs text-slate-700">
-                      {p.submitted_trx_id || '—'}
+                      {p.submitted_trx_id || (p.auto_verified ? 'Zero-TrxID Auto' : 'Zero-TrxID')}
                     </td>
                     <td className="py-3 px-4 font-mono tabular-nums text-xs text-slate-700">
                       {p.match_confidence !== null ? `${p.match_confidence}%` : '—'}
@@ -403,10 +451,15 @@ export function PaymentsTab({
                     </p>
                   </div>
                   <div>
-                    <p className="text-xs text-slate-500">Customer TrxID</p>
+                    <p className="text-xs text-slate-500">Transaction Ref</p>
                     <p className="mt-1 text-xs font-mono text-slate-900">
-                      {detail.payment.submitted_trx_id || 'Not submitted'}
+                      {detail.payment.submitted_trx_id || 'Zero-TrxID Session'}
                     </p>
+                    {detail.payment.verification_method && (
+                      <p className="text-[11px] font-mono text-teal-700 mt-0.5">
+                        {detail.payment.verification_method}
+                      </p>
+                    )}
                   </div>
                   <div>
                     <p className="text-xs text-slate-500">Current State</p>

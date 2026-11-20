@@ -6,6 +6,7 @@ import { requireAuth, requireRole } from '../middleware/auth.ts';
 import type { AuthedRequest } from '../middleware/auth.ts';
 import { emitPaymentUpdated } from '../realtime/socket.ts';
 import { recordAuditLog } from '../services/auditService.ts';
+import { assertPaymentCreationAllowed, EntitlementError } from '../services/entitlementService.ts';
 import {
   VerificationError,
   verifyPaymentManually,
@@ -229,12 +230,15 @@ paymentRoutes.post('/payments', requireAuth, async (req: AuthedRequest, res) => 
       ? req.user!.merchantId
       : String(req.body?.merchantId ?? '');
   const provider = String(req.body?.provider ?? 'BKASH').toUpperCase();
-  const accountMode = String(req.body?.accountMode ?? 'MERCHANT').toUpperCase();
+  const requestedAccountMode = req.body?.accountMode ? String(req.body.accountMode).toUpperCase() : null;
+  const mode: 'LIVE' | 'TEST' = String(req.body?.mode ?? 'LIVE').toUpperCase() === 'TEST' ? 'TEST' : 'LIVE';
   const amountBdt = Number(req.body?.amountBdt ?? 0);
   const merchantOrderId = String(req.body?.merchantOrderId ?? `ORD-${Date.now()}`).trim();
   const customerName = req.body?.customerName ? String(req.body.customerName).trim() : null;
   const customerPhone = req.body?.customerPhone ? String(req.body.customerPhone).trim() : null;
   const websiteId = req.body?.websiteId ? String(req.body.websiteId) : null;
+  const successUrl = req.body?.successUrl ? String(req.body.successUrl).trim() : null;
+  const cancelUrl = req.body?.cancelUrl ? String(req.body.cancelUrl).trim() : null;
 
   if (!merchantId || !VALID_PROVIDERS.includes(provider) || !Number.isFinite(amountBdt) || amountBdt <= 0) {
     res.status(400).json({ error: 'merchantId, valid provider, and positive amountBdt are required' });
@@ -243,10 +247,31 @@ paymentRoutes.post('/payments', requireAuth, async (req: AuthedRequest, res) => 
 
   const db = getDb();
   const merchant = await db.queryOne<{ name: string }>('SELECT name FROM merchants WHERE id = ?', [merchantId]);
-  const wallet = await db.queryOne<{ id: string; account_number: string; account_type: string }>(
-    'SELECT id, account_number, account_type FROM mfs_wallets WHERE merchant_id = ? AND provider = ? AND is_active = 1 LIMIT 1',
-    [merchantId, provider],
-  );
+  const wallet = requestedAccountMode
+    ? (await db.queryOne<{ id: string; account_number: string; account_type: string }>(
+        'SELECT id, account_number, account_type FROM mfs_wallets WHERE merchant_id = ? AND provider = ? AND account_type = ? AND is_active = 1 LIMIT 1',
+        [merchantId, provider, requestedAccountMode],
+      )) ??
+      (await db.queryOne<{ id: string; account_number: string; account_type: string }>(
+        'SELECT id, account_number, account_type FROM mfs_wallets WHERE merchant_id = ? AND provider = ? AND is_active = 1 LIMIT 1',
+        [merchantId, provider],
+      ))
+    : await db.queryOne<{ id: string; account_number: string; account_type: string }>(
+        'SELECT id, account_number, account_type FROM mfs_wallets WHERE merchant_id = ? AND provider = ? AND is_active = 1 LIMIT 1',
+        [merchantId, provider],
+      );
+
+  const accountMode = wallet?.account_type ?? requestedAccountMode ?? 'MERCHANT';
+
+  try {
+    await assertPaymentCreationAllowed(merchantId, { provider, accountType: accountMode, mode });
+  } catch (err) {
+    if (err instanceof EntitlementError) {
+      res.status(err.statusCode).json({ error: err.message, code: err.code });
+      return;
+    }
+    throw err;
+  }
 
   const id = newId();
   const now = isoNow();
@@ -266,9 +291,9 @@ paymentRoutes.post('/payments', requireAuth, async (req: AuthedRequest, res) => 
   await db.execute(
     `INSERT INTO payment_intents (
       id, merchant_id, website_id, wallet_id, merchant_order_id, idempotency_key, provider, account_mode,
-      amount_bdt, currency, customer_name, customer_phone, reference_code, bangla_qr_string,
-      status, expires_at, created_at, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'BDT', ?, ?, ?, ?, 'PENDING', ?, ?, ?)`,
+      mode, amount_bdt, requested_amount_bdt, unique_paisa_offset, currency, customer_name, customer_phone,
+      reference_code, success_url, cancel_url, bangla_qr_string, status, expires_at, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'BDT', ?, ?, ?, ?, ?, ?, 'PENDING', ?, ?, ?)`,
     [
       id,
       merchantId,
@@ -277,11 +302,15 @@ paymentRoutes.post('/payments', requireAuth, async (req: AuthedRequest, res) => 
       merchantOrderId,
       `portal-${id}`,
       provider,
-      wallet?.account_type ?? accountMode,
+      accountMode,
+      mode,
+      amountBdt,
       amountBdt,
       customerName,
       customerPhone,
       referenceCode,
+      successUrl,
+      cancelUrl,
       banglaQrString,
       expiresAt,
       now,
@@ -305,13 +334,15 @@ paymentRoutes.post('/payments', requireAuth, async (req: AuthedRequest, res) => 
     resourceType: 'payment_intent',
     resourceId: id,
     ipAddress: req.ip ?? null,
-    afterState: { merchantId, merchantOrderId, provider, amountBdt },
+    afterState: { merchantId, merchantOrderId, provider, mode, amountBdt },
   });
 
   res.status(201).json({
     id,
     merchantOrderId,
     provider,
+    mode,
+    accountMode,
     amountBdt,
     referenceCode,
     banglaQrString,
